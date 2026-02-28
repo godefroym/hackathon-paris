@@ -1,5 +1,3 @@
-.env
-.venv
+cle.env
+.ipynb_checkpoints/
 __pycache__/
-temporal.db
-debate_stream.jsonl
