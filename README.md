@@ -100,6 +100,8 @@ Numéricienne 2 travaille dans analysis/.
 
 Dev Web travaille dans frontend/.
 
+# Structure 
+
 Blocs concernés : Virtual mic ➔ (Nouveau sous-système de buffer)
 
 Le rôle : Capturer le son sans interruption et préparer les blocs superposés.
