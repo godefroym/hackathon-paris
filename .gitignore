@@ -1,3 +1,4 @@
 cle.env
 .ipynb_checkpoints/
 __pycache__/
+.env
