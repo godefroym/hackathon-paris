@@ -10,6 +10,8 @@ La distorsion rhétorique (Esquive) : La "langue de bois" où le candidat évite
 
 La distorsion de cohérence : Des retournements de veste rapides (moins de 6 mois) qui passent inaperçus dans le flux d'informations.
 
+Le manque de contexte 
+
 Vériscope résout ce problème en proposant une "War Room" citoyenne capable d'analyser, de sourcer et de contextualiser le discours politique avec une latence inférieure à 10 secondes.
 
 2. L'Architecture Technique (Stack Mistral)
