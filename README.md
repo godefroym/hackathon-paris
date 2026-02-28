@@ -99,3 +99,90 @@ Numéricien 1 travaille dans ingestion/.
 Numéricienne 2 travaille dans analysis/.
 
 Dev Web travaille dans frontend/.
+
+Blocs concernés : Virtual mic ➔ (Nouveau sous-système de buffer)
+
+Le rôle : Capturer le son sans interruption et préparer les blocs superposés.
+
+Entrée : Flux audio brut (ex: PCM, 16kHz) en continu depuis la vidéo/le micro.
+
+Sortie : Un fichier temporaire ou un buffer en mémoire contenant exactement les 20 dernières secondes d'audio, généré strictement toutes les 10 secondes.
+
+Comment l'implémenter : * Utilisez un script Python asynchrone avec une structure de données collections.deque (taille fixe correspondant à 20s d'échantillons).
+
+L'audio entre en continu d'un côté. Toutes les 10 secondes, une tâche asyncio "photographie" l'état actuel du deque et l'envoie au bloc suivant.
+
+2. Transcription Vocale (STT)
+Blocs concernés : STT ➔ Voxtral Realtime
+
+Le rôle : Transformer le bloc audio de 20s en texte.
+
+Entrée : Le chunk audio de 20 secondes.
+
+Sortie : Une chaîne de caractères (String) brute. Attention : à cause de la fenêtre glissante, la première moitié de ce texte sera quasiment identique à la seconde moitié du texte généré 10 secondes plus tôt.
+
+Outils recommandés : Voxtral (si disponible via Mistral), ou des API ultra-rapides comme Groq (Whisper) ou Deepgram pour minimiser la latence.
+
+3. Triage, Extraction et "Semantic Cache" (Le Filtre Anti-Doublon)
+Bloc concerné : Minitral (classification)
+
+Le rôle : Extraire les affirmations pertinentes et, surtout, bloquer les doublons créés par le chevauchement audio pour ne pas spammer OBS.
+
+Entrée : La chaîne de caractères brute de 20s.
+
+Sortie : Un objet JSON strict contenant uniquement les nouvelles affirmations vérifiables.
+
+JSON
+{
+  "nouvelles_affirmations": [
+    {"id": "aff_12", "texte": "Le chômage a baissé de 10% depuis mon élection."}
+  ]
+}
+Outils recommandés : Modèle rapide (ex: ministral-8b) en mode JSON.
+
+Comment l'implémenter :
+
+Prompt : Demandez au modèle d'extraire sous forme de liste les affirmations factuelles.
+
+Le Cache (Code Python) : Stockez en mémoire les affirmations des 60 dernières secondes. Quand Minitral sort une liste d'affirmations pour le bloc actuel, comparez-les rapidement au cache (avec une fonction de similarité textuelle comme TF-IDF ou un calcul de distance de Levenshtein très basique). Si l'affirmation a déjà été analysée il y a 10 secondes, elle est supprimée de la liste. Seules les nouvelles affirmations passent à l'étape suivante.
+
+4. Les 3 Agents d'Analyse (Exécution Parallèle)
+Blocs concernés : Statistique, Distorsion rhétorique, Cohérence + Tools (web search, mcp, rag)
+
+Le rôle : Vérifier l'affirmation sous trois angles différents simultanément.
+
+Entrée : L'objet JSON de la nouvelle affirmation extraite.
+
+Sortie : 3 rapports distincts au format JSON.
+
+JSON
+{
+  "agent": "distorsion_rhetorique",
+  "verdict": "trompeur",
+  "type": "homme_de_paille",
+  "explication": "Le locuteur invente un argument que son adversaire n'a jamais prononcé pour le discréditer."
+}
+Outils recommandés : * Agent 1 (Stats) : mistral-small + Tool Web Search (ex: Tavily).
+
+Agent 2 (Rhétorique) : mistral-large (nécessite beaucoup de finesse de raisonnement, pas d'outil externe nécessaire).
+
+Agent 3 (Cohérence) : mistral-small + MCP connecté à une base vectorielle (RAG) contenant les archives du candidat.
+
+Comment l'implémenter : Utilisez impérativement asyncio.gather() en Python. Les trois appels d'API vers Mistral doivent partir à la milliseconde près en même temps.
+
+5. Agrégation et Action TV (Tool Calling OBS)
+Blocs concernés : Mistral 3 (agrégation) ➔ Tools (changement de scène) ➔ OBS
+
+Le rôle : Prendre une décision finale et l'afficher à l'écran en direct.
+
+Entrée : Une liste regroupant les 3 JSON générés par les agents parallèles.
+
+Sortie : L'exécution d'un appel de fonction (Tool Calling) qui déclenche une requête WebSocket.
+
+Outils recommandés : mistral-large-latest avec Function Calling, et la librairie Python obs-websocket-py.
+
+Comment l'implémenter :
+
+Mistral reçoit un prompt système lui demandant de faire la synthèse des 3 agents. S'il y a un consensus sur le fait que la phrase est fausse/trompeuse, le modèle déclenche l'outil fourni : update_obs_alert(verdict_type, short_summary, source).
+
+Votre script Python intercepte cet appel de fonction et envoie une commande WebSocket à OBS pour rendre visible un groupe d'éléments (un calque texte avec le résumé + un fond de couleur) pendant 5 à 10 secondes, avant de le masquer à nouveau.
