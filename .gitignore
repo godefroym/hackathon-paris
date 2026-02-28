@@ -1,4 +1,10 @@
 cle.env
+cle.env.example.local
 .ipynb_checkpoints/
 __pycache__/
 .env
+debate_stream.jsonl
+received_fact_checks.jsonl
+temporal.db
+Temporal
+Temporal/

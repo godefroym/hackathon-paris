@@ -2,6 +2,7 @@ import os
 import json
 import asyncio 
 from pathlib import Path
+import requests
 from temporalio import activity
 from mistralai import Mistral
 from tavily import TavilyClient
@@ -27,6 +28,7 @@ client = Mistral(api_key=os.getenv("MISTRAL_API_KEY"))
 tavily_client = TavilyClient(api_key=os.getenv("TAVILY_API_KEY"))
 
 SOCIAL_BLACKLIST = ["tiktok.com", "facebook.com", "instagram.com", "x.com", "twitter.com"]
+DEFAULT_FACT_CHECK_POST_URL = "http://localhost:8000/api/stream/fact-check"
 
 # --- AGENT 1 : STATISTIQUES (MODE INVESTIGATION LIBRE) ---
 async def agent_statistique(data):
@@ -278,4 +280,31 @@ async def analyze_debate_line(current_json: dict, last_minute_json: dict) -> dic
         return {
             "afficher_bandeau": False,
             "erreur": str(e)
+        }
+
+
+@activity.defn
+async def post_fact_check_result(payload: dict) -> dict:
+    """
+    Envoie le résultat du workflow au service stream fact-check.
+    """
+    url = os.getenv("FACT_CHECK_POST_URL", DEFAULT_FACT_CHECK_POST_URL)
+
+    def _do_post():
+        return requests.post(url, json=payload, timeout=10)
+
+    try:
+        response = await asyncio.to_thread(_do_post)
+        body_preview = response.text[:1000]
+        return {
+            "posted": response.ok,
+            "status_code": response.status_code,
+            "url": url,
+            "response_body_preview": body_preview,
+        }
+    except Exception as exc:
+        return {
+            "posted": False,
+            "url": url,
+            "error": str(exc),
         }

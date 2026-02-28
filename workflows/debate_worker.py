@@ -7,7 +7,8 @@ import asyncio
 from temporalio.client import Client
 from temporalio.worker import Worker
 
-from debate_workflow import DEFAULT_TASK_QUEUE, DebateJsonNoopWorkflow
+from debate_config import DEFAULT_TASK_QUEUE
+from debate_workflow import DebateJsonNoopWorkflow
 
 
 def parse_args() -> argparse.Namespace:
@@ -34,11 +35,23 @@ def parse_args() -> argparse.Namespace:
 
 async def run() -> int:
     args = parse_args()
+    try:
+        from activities import analyze_debate_line, post_fact_check_result
+    except Exception as exc:
+        print(
+            "[temporal-worker] impossible de charger activities.py. "
+            "Verifie les dependances et les cles dans cle.env "
+            "(MISTRAL_API_KEY, TAVILY_API_KEY, FACT_CHECK_POST_URL)."
+        )
+        print(f"[temporal-worker] details: {exc}")
+        return 1
+
     client = await Client.connect(args.address, namespace=args.namespace)
     worker = Worker(
         client,
         task_queue=args.task_queue,
         workflows=[DebateJsonNoopWorkflow],
+        activities=[analyze_debate_line, post_fact_check_result],
     )
     print(
         f"[temporal-worker] listening task_queue={args.task_queue} "

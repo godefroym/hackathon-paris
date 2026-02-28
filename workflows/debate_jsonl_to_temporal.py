@@ -4,6 +4,7 @@ from __future__ import annotations
 import argparse
 import asyncio
 import json
+import os
 import sys
 import uuid
 from collections import deque
@@ -13,14 +14,24 @@ from typing import Any, TextIO
 
 from temporalio.client import Client
 
-from debate_workflow import (
-    DEFAULT_NOOP_SECONDS,
+from debate_config import (
+    DEFAULT_ANALYSIS_TIMEOUT_SECONDS,
     DEFAULT_TASK_QUEUE,
-    DebateJsonNoopWorkflow,
+    DEFAULT_VIDEO_DELAY_SECONDS,
+    WORKFLOW_TYPE,
 )
 
 
 def parse_args() -> argparse.Namespace:
+    video_delay_default = float(
+        os.environ.get("VIDEO_STREAM_DELAY_SECONDS", DEFAULT_VIDEO_DELAY_SECONDS)
+    )
+    analysis_timeout_default = int(
+        os.environ.get(
+            "FACT_CHECK_ANALYSIS_TIMEOUT_SECONDS", DEFAULT_ANALYSIS_TIMEOUT_SECONDS
+        )
+    )
+
     parser = argparse.ArgumentParser(
         description=(
             "Lit du JSONL (fichier ou stdin) et cree un workflow Temporal "
@@ -53,10 +64,28 @@ def parse_args() -> argparse.Namespace:
         help="Prefix des workflow ids (default: debate-line)",
     )
     parser.add_argument(
-        "--noop-seconds",
+        "--video-delay-seconds",
+        type=float,
+        default=video_delay_default,
+        help=(
+            "Delai video cible (sec). Le delai poste par ligne est calcule avec "
+            "video_delay - (timestamp_current - timestamp_previous)."
+        ),
+    )
+    parser.add_argument(
+        "--analysis-timeout-seconds",
         type=int,
-        default=DEFAULT_NOOP_SECONDS,
-        help=f"Duree du workflow no-op (default: {DEFAULT_NOOP_SECONDS})",
+        default=analysis_timeout_default,
+        help=(
+            "Timeout de l'activite d'analyse (sec). "
+            f"default: {analysis_timeout_default}"
+        ),
+    )
+    parser.add_argument(
+        "--noop-seconds",
+        type=float,
+        default=None,
+        help=argparse.SUPPRESS,
     )
     parser.add_argument(
         "--stop-on-invalid-json",
@@ -151,6 +180,11 @@ def build_last_minute_json(
 async def run() -> int:
     args = parse_args()
     client = await Client.connect(args.address, namespace=args.namespace)
+    video_delay_seconds = max(
+        0.0,
+        float(args.video_delay_seconds if args.noop_seconds is None else args.noop_seconds),
+    )
+    analysis_timeout_seconds = max(1, int(args.analysis_timeout_seconds))
 
     if args.input_jsonl == "-":
         input_handle = sys.stdin
@@ -164,6 +198,7 @@ async def run() -> int:
     invalid_lines = 0
     submitted = 0
     recent_payloads: deque[tuple[datetime, dict[str, Any]]] = deque()
+    previous_payload_timestamp: datetime | None = None
     try:
         for line in input_handle:
             total_lines += 1
@@ -192,6 +227,15 @@ async def run() -> int:
             while recent_payloads and recent_payloads[0][0] < cutoff:
                 recent_payloads.popleft()
 
+            gap_seconds = 0.0
+            if previous_payload_timestamp is not None:
+                gap_seconds = max(
+                    0.0,
+                    (payload_timestamp - previous_payload_timestamp).total_seconds(),
+                )
+            computed_post_delay_seconds = max(0.0, video_delay_seconds - gap_seconds)
+            previous_payload_timestamp = payload_timestamp
+
             window_snapshot = list(recent_payloads)
             last_minute_json = build_last_minute_json(
                 current_payload=payload,
@@ -201,14 +245,22 @@ async def run() -> int:
             submitted += 1
             workflow_id = build_workflow_id(args.workflow_id_prefix, submitted)
             await client.start_workflow(
-                DebateJsonNoopWorkflow.run,
-                args=[payload, last_minute_json, args.noop_seconds],
+                WORKFLOW_TYPE,
+                args=[
+                    payload,
+                    last_minute_json,
+                    computed_post_delay_seconds,
+                    analysis_timeout_seconds,
+                ],
                 id=workflow_id,
                 task_queue=args.task_queue,
             )
             print(
                 "[jsonl-to-temporal] submitted "
-                f"workflow_id={workflow_id} noop_seconds={args.noop_seconds} "
+                f"workflow_id={workflow_id} "
+                f"gap_seconds={gap_seconds:.3f} "
+                f"computed_post_delay_seconds={computed_post_delay_seconds:.3f} "
+                f"analysis_timeout_seconds={analysis_timeout_seconds} "
                 f"last_minute_phrases={last_minute_json['metadata']['phrases_count']}",
                 file=sys.stderr,
             )
