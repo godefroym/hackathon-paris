@@ -8,3 +8,4 @@ received_fact_checks.jsonl
 temporal.db
 Temporal
 Temporal/
+.DS_Store
