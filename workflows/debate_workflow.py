@@ -15,6 +15,7 @@ from debate_config import (
 )
 
 ANALYZE_ACTIVITY_NAME = "analyze_debate_line"
+SELF_CORRECTION_ACTIVITY_NAME = "check_next_phrase_self_correction"
 POST_ACTIVITY_NAME = "post_fact_check_result"
 
 
@@ -27,6 +28,7 @@ class DebateJsonNoopWorkflow:
         last_minute_json: dict[str, Any],
         post_delay_seconds: float = DEFAULT_VIDEO_DELAY_SECONDS,
         analysis_timeout_seconds: int = DEFAULT_ANALYSIS_TIMEOUT_SECONDS,
+        next_json: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         # Run analysis first, then wait the remaining stream-delay time before POST.
         delay_before_post = max(0.0, float(post_delay_seconds))
@@ -37,6 +39,7 @@ class DebateJsonNoopWorkflow:
             analysis_timeout_seconds=analysis_timeout,
             has_current_json=True,
             has_last_minute_json=True,
+            has_next_json=bool(next_json),
         )
 
         analysis_started = workflow.time()
@@ -45,21 +48,54 @@ class DebateJsonNoopWorkflow:
             args=[current_json, last_minute_json],
             start_to_close_timeout=timedelta(seconds=analysis_timeout),
         )
-        analysis_elapsed = max(0.0, workflow.time() - analysis_started)
-        remaining_delay = max(0.0, delay_before_post - analysis_elapsed)
+        correction_check = await workflow.execute_activity(
+            SELF_CORRECTION_ACTIVITY_NAME,
+            args=[current_json, next_json, last_minute_json],
+            start_to_close_timeout=timedelta(seconds=min(analysis_timeout, 10)),
+        )
+        pre_post_elapsed = max(0.0, workflow.time() - analysis_started)
+        remaining_delay = max(0.0, delay_before_post - pre_post_elapsed)
         if remaining_delay > 0:
             await workflow.sleep(remaining_delay)
 
-        post_result = await workflow.execute_activity(
-            POST_ACTIVITY_NAME,
-            args=[analysis_result],
-            start_to_close_timeout=timedelta(seconds=DEFAULT_POST_TIMEOUT_SECONDS),
-        )
+        skip_post_due_to_correction = False
+        if isinstance(correction_check, dict):
+            skip_post_due_to_correction = bool(
+                correction_check.get("has_next_phrase")
+                and correction_check.get("next_is_correction")
+            )
+
+        if skip_post_due_to_correction:
+            reason = ""
+            if isinstance(correction_check, dict):
+                reason = str(correction_check.get("reason", "")).strip()
+            if isinstance(analysis_result, dict):
+                analysis_result = {
+                    **analysis_result,
+                    "afficher_bandeau": False,
+                    "raison": (
+                        "Fact-check ignore: phrase suivante identifiee comme correction."
+                        if not reason
+                        else f"Fact-check ignore: {reason}"
+                    ),
+                }
+            post_result = {
+                "posted": False,
+                "skipped": True,
+                "reason": "next_phrase_self_correction",
+            }
+        else:
+            post_result = await workflow.execute_activity(
+                POST_ACTIVITY_NAME,
+                args=[analysis_result],
+                start_to_close_timeout=timedelta(seconds=DEFAULT_POST_TIMEOUT_SECONDS),
+            )
 
         workflow.logger.info(
             "Workflow completed",
-            analysis_elapsed_seconds=analysis_elapsed,
+            pre_post_elapsed_seconds=pre_post_elapsed,
             remaining_delay_seconds=remaining_delay,
+            skip_post_due_to_correction=skip_post_due_to_correction,
         )
         current_keys = sorted(current_json.keys()) if isinstance(current_json, dict) else []
         last_minute_phrases = []
@@ -71,10 +107,12 @@ class DebateJsonNoopWorkflow:
             "accepted": True,
             "requested_delay_before_post_seconds": delay_before_post,
             "analysis_timeout_seconds": analysis_timeout,
-            "analysis_elapsed_seconds": analysis_elapsed,
+            "pre_post_elapsed_seconds": pre_post_elapsed,
             "remaining_delay_seconds": remaining_delay,
             "current_json_keys": current_keys,
             "last_minute_phrases_count": len(last_minute_phrases),
+            "correction_check": correction_check,
+            "skip_post_due_to_correction": skip_post_due_to_correction,
             "analysis_result": analysis_result,
             "post_result": post_result,
         }

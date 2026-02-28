@@ -154,10 +154,15 @@ def build_last_minute_json(
     window_payloads: list[tuple[datetime, dict[str, Any]]],
 ) -> dict[str, Any]:
     phrases: list[str] = []
-    for _, payload in window_payloads:
+    previous_phrases: list[str] = []
+    window_len = len(window_payloads)
+    for idx, (_, payload) in enumerate(window_payloads):
         phrase = extract_phrase(payload)
         if phrase:
             phrases.append(phrase)
+            # Contexte de la derniere minute sans la phrase courante.
+            if idx < window_len - 1:
+                previous_phrases.append(phrase)
 
     from_timestamp = (
         format_utc_iso_millis(window_payloads[0][0]) if window_payloads else None
@@ -168,11 +173,13 @@ def build_last_minute_json(
         "personne": current_payload.get("personne", ""),
         "question_posee": current_payload.get("question_posee", ""),
         "phrases": phrases,
+        "previous_phrases": previous_phrases,
         "metadata": {
             "window_seconds": 60,
             "from_timestamp": from_timestamp,
             "to_timestamp": to_timestamp,
             "phrases_count": len(phrases),
+            "previous_phrases_count": len(previous_phrases),
         },
     }
 
@@ -198,7 +205,42 @@ async def run() -> int:
     invalid_lines = 0
     submitted = 0
     recent_payloads: deque[tuple[datetime, dict[str, Any]]] = deque()
-    previous_payload_timestamp: datetime | None = None
+    pending_item: dict[str, Any] | None = None
+
+    async def submit_item(
+        *,
+        item: dict[str, Any],
+        next_payload: dict[str, Any] | None,
+        gap_seconds: float,
+    ) -> None:
+        nonlocal submitted
+        computed_post_delay_seconds = max(0.0, video_delay_seconds - max(0.0, gap_seconds))
+        submitted += 1
+        workflow_id = build_workflow_id(args.workflow_id_prefix, submitted)
+        await client.start_workflow(
+            WORKFLOW_TYPE,
+            args=[
+                item["payload"],
+                item["last_minute_json"],
+                computed_post_delay_seconds,
+                analysis_timeout_seconds,
+                next_payload,
+            ],
+            id=workflow_id,
+            task_queue=args.task_queue,
+        )
+        next_phrase = extract_phrase(next_payload) if isinstance(next_payload, dict) else ""
+        print(
+            "[jsonl-to-temporal] submitted "
+            f"workflow_id={workflow_id} "
+            f"gap_seconds={gap_seconds:.3f} "
+            f"computed_post_delay_seconds={computed_post_delay_seconds:.3f} "
+            f"analysis_timeout_seconds={analysis_timeout_seconds} "
+            f"last_minute_phrases={item['last_minute_json']['metadata']['phrases_count']} "
+            f"has_next_phrase={bool(next_phrase)}",
+            file=sys.stderr,
+        )
+
     try:
         for line in input_handle:
             total_lines += 1
@@ -222,47 +264,38 @@ async def run() -> int:
                 payload = {"payload": payload}
 
             payload_timestamp = parse_payload_timestamp(payload)
+            if pending_item is not None:
+                gap_seconds = max(
+                    0.0,
+                    (payload_timestamp - pending_item["payload_timestamp"]).total_seconds(),
+                )
+                await submit_item(
+                    item=pending_item,
+                    next_payload=payload,
+                    gap_seconds=gap_seconds,
+                )
+
             recent_payloads.append((payload_timestamp, payload))
             cutoff = payload_timestamp - timedelta(seconds=60)
             while recent_payloads and recent_payloads[0][0] < cutoff:
                 recent_payloads.popleft()
-
-            gap_seconds = 0.0
-            if previous_payload_timestamp is not None:
-                gap_seconds = max(
-                    0.0,
-                    (payload_timestamp - previous_payload_timestamp).total_seconds(),
-                )
-            computed_post_delay_seconds = max(0.0, video_delay_seconds - gap_seconds)
-            previous_payload_timestamp = payload_timestamp
 
             window_snapshot = list(recent_payloads)
             last_minute_json = build_last_minute_json(
                 current_payload=payload,
                 window_payloads=window_snapshot,
             )
+            pending_item = {
+                "payload": payload,
+                "payload_timestamp": payload_timestamp,
+                "last_minute_json": last_minute_json,
+            }
 
-            submitted += 1
-            workflow_id = build_workflow_id(args.workflow_id_prefix, submitted)
-            await client.start_workflow(
-                WORKFLOW_TYPE,
-                args=[
-                    payload,
-                    last_minute_json,
-                    computed_post_delay_seconds,
-                    analysis_timeout_seconds,
-                ],
-                id=workflow_id,
-                task_queue=args.task_queue,
-            )
-            print(
-                "[jsonl-to-temporal] submitted "
-                f"workflow_id={workflow_id} "
-                f"gap_seconds={gap_seconds:.3f} "
-                f"computed_post_delay_seconds={computed_post_delay_seconds:.3f} "
-                f"analysis_timeout_seconds={analysis_timeout_seconds} "
-                f"last_minute_phrases={last_minute_json['metadata']['phrases_count']}",
-                file=sys.stderr,
+        if pending_item is not None:
+            await submit_item(
+                item=pending_item,
+                next_payload=None,
+                gap_seconds=0.0,
             )
     finally:
         if should_close:

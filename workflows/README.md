@@ -51,8 +51,8 @@ Create `cle.env` at repo root (required by `activities.py`):
 ```bash
 cd ..
 cp cle.env.example cle.env
-# puis remplir MISTRAL_API_KEY, TAVILY_API_KEY, FACT_CHECK_POST_URL
-# VIDEO_STREAM_DELAY_SECONDS et FACT_CHECK_ANALYSIS_TIMEOUT_SECONDS sont optionnels
+# puis remplir MISTRAL_API_KEY, FACT_CHECK_POST_URL
+# MISTRAL_WEB_SEARCH_MODEL, VIDEO_STREAM_DELAY_SECONDS et FACT_CHECK_ANALYSIS_TIMEOUT_SECONDS sont optionnels
 ```
 
 Then start the worker:
