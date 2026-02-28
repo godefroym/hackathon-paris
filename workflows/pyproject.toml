@@ -1,0 +1,9 @@
+[project]
+name = "workflows"
+version = "0.0.0"
+description = "Hackathon Paris"
+readme = "README.md"
+requires-python = ">=3.14"
+dependencies = [
+    "temporalio>=1.23.0",
+]
