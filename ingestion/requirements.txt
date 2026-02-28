@@ -1,3 +1,5 @@
 mistralai[realtime]
 pyaudio
 temporalio
+python-dotenv
+tavily-python
