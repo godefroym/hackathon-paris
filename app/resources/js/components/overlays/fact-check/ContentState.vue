@@ -10,7 +10,7 @@ const contentState = tv({
     headerTitle: 'text-xl font-semibold',
     poweredBy: 'font-light text-sm flex flex-row items-center gap-2',
     logoSmall: 'size-5',
-    content: 'space-y-4',
+    content: 'mt-8 space-y-4',
     section: 'space-y-2',
     sectionTitle: 'text-xl font-semibold',
     sectionText: 'text-lg leading-relaxed',
