@@ -39,6 +39,7 @@ Connexion : Il écrit le résultat dans un objet Python (ou un fichier stream_te
 
 JSON
 { "timestamp": "12:05", "raw_text": "Le chômage a baissé de 2%." }
+
 🧠 Rôle 2 : Numéricienne 2 (Le Cerveau - Toi)
 Mission : Transformer le texte brut en analyse structurée.
 
