@@ -189,3 +189,12 @@ Comment l'implémenter :
 Mistral reçoit un prompt système lui demandant de faire la synthèse des 3 agents. S'il y a un consensus sur le fait que la phrase est fausse/trompeuse, le modèle déclenche l'outil fourni : update_obs_alert(verdict_type, short_summary, source).
 
 Votre script Python intercepte cet appel de fonction et envoie une commande WebSocket à OBS pour rendre visible un groupe d'éléments (un calque texte avec le résumé + un fond de couleur) pendant 5 à 10 secondes, avant de le masquer à nouveau.
+
+## Intégration en cours (transcript + Temporal)
+
+- Transcription realtime: `ingestion/realtime_transcript.py`
+- Workflow no-op 30s par ligne JSON: `workflows/debate_workflow.py`
+- Worker Temporal associé: `workflows/debate_worker.py`
+- Envoi JSONL vers Temporal: `workflows/debate_jsonl_to_temporal.py`
+
+Voir `ingestion/README.md` et `workflows/README.md` pour le runbook.
