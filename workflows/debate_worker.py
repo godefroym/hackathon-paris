@@ -36,12 +36,16 @@ def parse_args() -> argparse.Namespace:
 async def run() -> int:
     args = parse_args()
     try:
-        from activities import analyze_debate_line, post_fact_check_result
+        from activities import (
+            analyze_debate_line,
+            check_next_phrase_self_correction,
+            post_fact_check_result,
+        )
     except Exception as exc:
         print(
             "[temporal-worker] impossible de charger activities.py. "
             "Verifie les dependances et les cles dans cle.env "
-            "(MISTRAL_API_KEY, TAVILY_API_KEY, FACT_CHECK_POST_URL)."
+            "(MISTRAL_API_KEY, FACT_CHECK_POST_URL)."
         )
         print(f"[temporal-worker] details: {exc}")
         return 1
@@ -51,7 +55,11 @@ async def run() -> int:
         client,
         task_queue=args.task_queue,
         workflows=[DebateJsonNoopWorkflow],
-        activities=[analyze_debate_line, post_fact_check_result],
+        activities=[
+            analyze_debate_line,
+            check_next_phrase_self_correction,
+            post_fact_check_result,
+        ],
     )
     print(
         f"[temporal-worker] listening task_queue={args.task_queue} "
