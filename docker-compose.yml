@@ -62,18 +62,6 @@ x-workflows-common: &workflows-common
   restart: unless-stopped
 
 services:
-  mediamtx:
-    image: bluenviron/mediamtx:latest
-    container_name: mediamtx
-    restart: unless-stopped
-    ports:
-      - "8890:8890/udp" # SRT
-      - "1935:1935" # RTMP
-      - "8554:8554" # RTSP
-      - "8888:8888" # HTTP API
-    volumes:
-      - ./mediamtx.yml:/mediamtx.yml
-
   postgresql:
     image: postgres:${POSTGRESQL_VERSION}
     container_name: temporal-postgresql
