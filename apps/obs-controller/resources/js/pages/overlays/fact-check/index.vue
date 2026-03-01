@@ -56,61 +56,60 @@ useEchoPublic<FactCheckEventPayload>(
 <template>
   <UApp>
     <div :class="ui.root()">
-    <AnimatePresence mode="popLayout">
-      <Motion
-        v-if="!showFactCheck"
-        :class="ui.panel()"
-        :initial="{
+      <AnimatePresence mode="popLayout">
+        <Motion
+          v-if="!showFactCheck"
+          :class="ui.panel()"
+          :initial="{
             opacity: 0,
-            transform: 'translateX(-20px)'
-        }"
-        :animate="{
+            transform: 'translateX(-20px)',
+          }"
+          :animate="{
             opacity: 1,
-            transform: 'translateX(0)'
-        }"
-        :exit="{
+            transform: 'translateX(0)',
+          }"
+          :exit="{
             opacity: 0,
-            transform: 'translateX(-20px)'
-        }"
-        :transition="{
+            transform: 'translateX(-20px)',
+          }"
+          :transition="{
             duration: 0.8,
-        }"
-      >
-        <UCard :class="ui.card()" class="w-60">
-          <LoadingState  />
-        </UCard>
-
-      </Motion>
-      <Motion
-        v-else
-        :class="ui.panel()"
-        :initial="{
+          }"
+        >
+          <UCard :class="ui.card()" class="w-60">
+            <LoadingState />
+          </UCard>
+        </Motion>
+        <Motion
+          v-else
+          :class="ui.panel()"
+          :initial="{
             opacity: 0,
-            transform: 'translateX(-20px)'
-        }"
-        :animate="{
+            transform: 'translateX(-20px)',
+          }"
+          :animate="{
             opacity: 1,
-            transform: 'translateX(0)'
-        }"
-        :exit="{
+            transform: 'translateX(0)',
+          }"
+          :exit="{
             opacity: 0,
-            transform: 'translateX(-20px)'
-        }"
-        :transition="{
+            transform: 'translateX(-20px)',
+          }"
+          :transition="{
             duration: 0.8,
-        }"
-      >
-        <UCard :class="ui.card()" class="w-md">
-          <ContentState
-            :payload="payload"
-            :has-claim="hasClaim"
-            :has-analysis-summary="hasAnalysisSummary"
-            :has-sources="hasSources"
-            :has-verdict="hasVerdict"
-           />
-        </UCard>
-      </Motion>
-    </AnimatePresence>
+          }"
+        >
+          <UCard :class="ui.card()" class="w-md">
+            <ContentState
+              :payload="payload"
+              :has-claim="hasClaim"
+              :has-analysis-summary="hasAnalysisSummary"
+              :has-sources="hasSources"
+              :has-verdict="hasVerdict"
+            />
+          </UCard>
+        </Motion>
+      </AnimatePresence>
     </div>
   </UApp>
 </template>

@@ -72,10 +72,10 @@ Use Wayfinder with `useForm`:
 
 <!-- Wayfinder useForm -->
 ```typescript
-import { store } from "@/actions/App/Http/Controllers/ExampleController";
+import { store } from '@/actions/App/Http/Controllers/ExampleController'
 
-const form = useForm({ name: "My Big Post" });
-form.submit(store());
+const form = useForm({ name: 'My Big Post' })
+form.submit(store())
 ```
 
 ## Verification

@@ -32,22 +32,17 @@ export default defineConfig({
         dts: 'resources/js/auto-imports.d.ts',
         imports: [
           'vue',
-          '@vueuse/core',
           {
-            from: "tailwind-variants",
-            imports: ["tv"],
+            from: 'tailwind-variants',
+            imports: ['tv'],
           },
         ],
-        exclude: ['resources/js/wayfinder/**', 'resources/js/routes/**'],
       },
       components: {
         dts: 'resources/js/components.d.ts',
         dirs: ['resources/js/components'],
       },
       router: 'inertia',
-    }),
-    wayfinder({
-      formVariants: true,
     }),
   ],
 })

@@ -25,9 +25,9 @@ const ui = computed(() => gradient())
 </script>
 
 <template>
-    <div :class="ui.base({ class: [props.ui?.base, props.class] })">
-        <div :class="ui.red({ class: props.ui?.red })" />
-        <div :class="ui.orange({ class: props.ui?.orange })" />
-        <div :class="ui.yellow({ class: props.ui?.yellow })" />
-    </div>
+  <div :class="ui.base({ class: [props.ui?.base, props.class] })">
+    <div :class="ui.red({ class: props.ui?.red })" />
+    <div :class="ui.orange({ class: props.ui?.orange })" />
+    <div :class="ui.yellow({ class: props.ui?.yellow })" />
+  </div>
 </template>

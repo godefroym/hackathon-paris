@@ -1,11 +1,25 @@
-@import 'tailwindcss';
+@import "tailwindcss";
+@import "@nuxt/ui";
 
-@source '../../vendor/laravel/framework/src/Illuminate/Pagination/resources/views/*.blade.php';
-@source '../../storage/framework/views/*.php';
+:root {
+    --ui-primary: black;
+}
 
-@theme inline {
-    --font-sans:
-        Instrument Sans, ui-sans-serif, system-ui, sans-serif,
-        'Apple Color Emoji', 'Segoe UI Emoji', 'Segoe UI Symbol',
-        'Noto Color Emoji';
+.dark {
+    --ui-primary: white;
+}
+
+@keyframes dot-hop {
+
+    0%,
+    60%,
+    100% {
+        transform: translateY(0);
+        opacity: 0.6;
+    }
+
+    30% {
+        transform: translateY(-0.3rem);
+        opacity: 1;
+    }
 }

@@ -33,8 +33,8 @@ export default defineConfig({
         imports: [
           'vue',
           {
-            from: "tailwind-variants",
-            imports: ["tv"],
+            from: 'tailwind-variants',
+            imports: ['tv'],
           },
         ],
       },

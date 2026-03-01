@@ -23,5 +23,6 @@ yarn-error.log
 /.fleet
 /.idea
 /.nova
-/.vscode
 /.zed
+auto-imports.d.ts
+components.d.ts
