@@ -23,6 +23,21 @@ x-laravel-app-common: &laravel-app-common
     - app-network
   restart: unless-stopped
 
+x-workflows-common: &workflows-common
+  build:
+    context: .
+    dockerfile: workflows/Dockerfile
+  working_dir: /workspace
+  env_file:
+    - path: ./cle.env
+      required: false
+  volumes:
+    - ./:/workspace
+  networks:
+    - temporal-network
+    - app-network
+  restart: unless-stopped
+
 services:
   mediamtx:
     image: bluenviron/mediamtx:latest
@@ -204,6 +219,29 @@ services:
     command: [ "php", "artisan", "reverb:start", "--host=0.0.0.0", "--port=8080" ]
     ports:
       - "8081:8080"
+
+  workflows-worker:
+    <<: *workflows-common
+    container_name: workflows-worker
+    depends_on:
+      temporal-create-namespace:
+        condition: service_completed_successfully
+      app-web:
+        condition: service_healthy
+    environment:
+      FACT_CHECK_POST_URL: ${FACT_CHECK_POST_URL:-http://app-web:8000/api/stream/fact-check}
+    command: [ "python", "workflows/debate_worker.py", "--address", "temporal:7233" ]
+
+  workflows-launcher:
+    <<: *workflows-common
+    depends_on:
+      temporal:
+        condition: service_healthy
+    restart: "no"
+    stdin_open: true
+    tty: false
+    command:
+      [ "python", "workflows/debate_jsonl_to_temporal.py", "--address", "temporal:7233", "--input-jsonl", "-" ]
 
 networks:
   app-network:

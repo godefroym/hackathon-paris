@@ -365,8 +365,7 @@ If you don't have the real stream service running:
 
 ```bash
 cd ..
-source ingestion/.venv/bin/activate
-python scripts/mock_fact_check_receiver.py --port 8000
+./scripts/run_stack.sh up
 ```
 
 ### 3) Start the Temporal workers
