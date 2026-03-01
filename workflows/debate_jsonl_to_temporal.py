@@ -5,6 +5,7 @@ import argparse
 import asyncio
 import json
 import os
+import select
 import sys
 import uuid
 from collections import deque
@@ -86,6 +87,15 @@ def parse_args() -> argparse.Namespace:
         type=float,
         default=None,
         help=argparse.SUPPRESS,
+    )
+    parser.add_argument(
+        "--max-wait-next-phrase-seconds",
+        type=float,
+        default=4.0,
+        help=(
+            "En stdin, attente max de la phrase suivante avant envoi de la phrase "
+            "en attente sans next_json (default: 4.0)."
+        ),
     )
     parser.add_argument(
         "--stop-on-invalid-json",
@@ -241,55 +251,82 @@ async def run() -> int:
             file=sys.stderr,
         )
 
-    try:
-        for line in input_handle:
-            total_lines += 1
-            raw = line.strip()
-            if not raw:
-                continue
-
-            try:
-                payload = json.loads(raw)
-            except json.JSONDecodeError as exc:
-                invalid_lines += 1
-                print(
-                    f"[jsonl-to-temporal] ligne {total_lines} invalide: {exc}",
-                    file=sys.stderr,
-                )
-                if args.stop_on_invalid_json:
-                    raise
-                continue
-
-            if not isinstance(payload, dict):
-                payload = {"payload": payload}
-
-            payload_timestamp = parse_payload_timestamp(payload)
-            if pending_item is not None:
-                gap_seconds = max(
-                    0.0,
-                    (payload_timestamp - pending_item["payload_timestamp"]).total_seconds(),
-                )
-                await submit_item(
-                    item=pending_item,
-                    next_payload=payload,
-                    gap_seconds=gap_seconds,
-                )
-
-            recent_payloads.append((payload_timestamp, payload))
-            cutoff = payload_timestamp - timedelta(seconds=60)
-            while recent_payloads and recent_payloads[0][0] < cutoff:
-                recent_payloads.popleft()
-
-            window_snapshot = list(recent_payloads)
-            last_minute_json = build_last_minute_json(
-                current_payload=payload,
-                window_payloads=window_snapshot,
+    async def process_raw_line(raw: str, line_number: int) -> None:
+        nonlocal invalid_lines, pending_item
+        try:
+            payload = json.loads(raw)
+        except json.JSONDecodeError as exc:
+            invalid_lines += 1
+            print(
+                f"[jsonl-to-temporal] ligne {line_number} invalide: {exc}",
+                file=sys.stderr,
             )
-            pending_item = {
-                "payload": payload,
-                "payload_timestamp": payload_timestamp,
-                "last_minute_json": last_minute_json,
-            }
+            if args.stop_on_invalid_json:
+                raise
+            return
+
+        if not isinstance(payload, dict):
+            payload = {"payload": payload}
+
+        payload_timestamp = parse_payload_timestamp(payload)
+        if pending_item is not None:
+            gap_seconds = max(
+                0.0,
+                (payload_timestamp - pending_item["payload_timestamp"]).total_seconds(),
+            )
+            await submit_item(
+                item=pending_item,
+                next_payload=payload,
+                gap_seconds=gap_seconds,
+            )
+
+        recent_payloads.append((payload_timestamp, payload))
+        cutoff = payload_timestamp - timedelta(seconds=60)
+        while recent_payloads and recent_payloads[0][0] < cutoff:
+            recent_payloads.popleft()
+
+        window_snapshot = list(recent_payloads)
+        last_minute_json = build_last_minute_json(
+            current_payload=payload,
+            window_payloads=window_snapshot,
+        )
+        pending_item = {
+            "payload": payload,
+            "payload_timestamp": payload_timestamp,
+            "last_minute_json": last_minute_json,
+        }
+
+    try:
+        if args.input_jsonl == "-":
+            max_wait = max(0.0, float(args.max_wait_next_phrase_seconds))
+            while True:
+                timeout = max_wait if pending_item is not None else None
+                ready, _, _ = select.select([input_handle], [], [], timeout)
+                if not ready:
+                    if pending_item is not None:
+                        await submit_item(
+                            item=pending_item,
+                            next_payload=None,
+                            gap_seconds=0.0,
+                        )
+                        pending_item = None
+                    continue
+
+                line = input_handle.readline()
+                if line == "":
+                    break
+                total_lines += 1
+                raw = line.strip()
+                if not raw:
+                    continue
+                await process_raw_line(raw, total_lines)
+        else:
+            for line in input_handle:
+                total_lines += 1
+                raw = line.strip()
+                if not raw:
+                    continue
+                await process_raw_line(raw, total_lines)
 
         if pending_item is not None:
             await submit_item(

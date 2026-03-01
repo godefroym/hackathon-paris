@@ -32,19 +32,15 @@ Main timing variables (in `cle.env` or CLI):
 
 ### Run
 
-Start Temporal dev server first:
-
-```bash
-temporal server start-dev --db-filename temporal.db --ui-port 8233
-```
-
-Optional: start a local mock receiver for POST validation:
+Start the full stack (Temporal + app API + workflow worker) with Docker:
 
 ```bash
 cd ..
-source ingestion/.venv/bin/activate
-python scripts/mock_fact_check_receiver.py --port 8000
+./scripts/run_stack.sh up
 ```
+
+The stack now includes namespace creation (`temporal-create-namespace`) before
+starting `workflows-worker`.
 
 Create `cle.env` at repo root (required by `activities.py`):
 
@@ -55,18 +51,19 @@ cp cle.env.example cle.env
 # MISTRAL_WEB_SEARCH_MODEL, VIDEO_STREAM_DELAY_SECONDS et FACT_CHECK_ANALYSIS_TIMEOUT_SECONDS sont optionnels
 ```
 
-Then start the worker:
+Optional: start a local mock receiver for POST validation (outside Docker):
 
 ```bash
-cd workflows
-uv run python debate_worker.py
+cd ..
+source ingestion/.venv/bin/activate
+python scripts/mock_fact_check_receiver.py --port 8000
 ```
 
 Submit JSON lines from a file:
 
 ```bash
 cd workflows
-uv run python debate_jsonl_to_temporal.py --input-jsonl ../debate_stream.jsonl --video-delay-seconds 30
+python debate_jsonl_to_temporal.py --input-jsonl ../debate_stream.jsonl --video-delay-seconds 30
 ```
 
 Submit JSON lines from a live stream:
@@ -80,5 +77,19 @@ python ingestion/realtime_transcript.py \
   --source-video "TF1 20h" \
   --question-posee "" \
 | tee debate_stream.jsonl \
-| python workflows/debate_jsonl_to_temporal.py --video-delay-seconds 30
+| docker compose run --rm -T workflows-launcher \
+    python workflows/debate_jsonl_to_temporal.py --address temporal:7233 --input-jsonl - --video-delay-seconds 30
+```
+
+To stop everything:
+
+```bash
+./scripts/run_stack.sh down
+```
+
+Useful commands:
+
+```bash
+./scripts/run_stack.sh ps
+./scripts/run_stack.sh logs workflows-worker
 ```
