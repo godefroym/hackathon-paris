@@ -1,24 +1,47 @@
 name: paris
 
-x-laravel-app-common: &laravel-app-common
+x-obs-controller-app-common: &obs-controller-app-common
   build:
-    context: ./app
+    context: ./apps/obs-controller
     dockerfile: Dockerfile
     args:
-      VITE_APP_NAME: ${VITE_APP_NAME}
-      VITE_REVERB_APP_KEY: ${VITE_REVERB_APP_KEY}
-      VITE_REVERB_HOST: ${VITE_REVERB_HOST}
-      VITE_REVERB_PORT: ${VITE_REVERB_PORT}
-      VITE_REVERB_SCHEME: ${VITE_REVERB_SCHEME}
+      VITE_APP_NAME: ${OBS_VITE_APP_NAME}
+      VITE_REVERB_APP_KEY: ${OBS_VITE_REVERB_APP_KEY}
+      VITE_REVERB_HOST: ${OBS_VITE_REVERB_HOST}
+      VITE_REVERB_PORT: ${OBS_VITE_REVERB_PORT}
+      VITE_REVERB_SCHEME: ${OBS_VITE_REVERB_SCHEME}
   working_dir: /var/www/html
   env_file:
-    - path: ./app/.env.production
+    - path: ./apps/obs-controller/.env.production
       required: false
   environment:
     RUN_MIGRATIONS: "false"
   volumes:
-    - ./app/storage:/var/www/html/storage
-    - ./app/database:/var/www/html/database
+    - ./apps/obs-controller/storage:/var/www/html/storage
+    - ./apps/obs-controller/database:/var/www/html/database
+  networks:
+    - app-network
+  restart: unless-stopped
+
+x-veristral-app-common: &veristral-app-common
+  build:
+    context: ./apps/veristral
+    dockerfile: Dockerfile
+    args:
+      VITE_APP_NAME: ${VERISTRAL_VITE_APP_NAME}
+      VITE_REVERB_APP_KEY: ${VERISTRAL_VITE_REVERB_APP_KEY}
+      VITE_REVERB_HOST: ${VERISTRAL_VITE_REVERB_HOST}
+      VITE_REVERB_PORT: ${VERISTRAL_VITE_REVERB_PORT}
+      VITE_REVERB_SCHEME: ${VERISTRAL_VITE_REVERB_SCHEME}
+  working_dir: /var/www/html
+  env_file:
+    - path: ./apps/veristral/.env.production
+      required: false
+  environment:
+    RUN_MIGRATIONS: "false"
+  volumes:
+    - ./apps/veristral/storage:/var/www/html/storage
+    - ./apps/veristral/database:/var/www/html/database
   networks:
     - app-network
   restart: unless-stopped
@@ -182,7 +205,7 @@ services:
       - 8080:8080
 
   app-web:
-    <<: *laravel-app-common
+    <<: *obs-controller-app-common
     container_name: app-web
     environment:
       RUN_MIGRATIONS: "true"
@@ -199,7 +222,7 @@ services:
       start_period: 20s
 
   app-queue:
-    <<: *laravel-app-common
+    <<: *obs-controller-app-common
     container_name: app-queue
     networks:
       - app-network
@@ -209,7 +232,7 @@ services:
     command: [ "php", "artisan", "queue:listen", "--tries=1", "--timeout=0" ]
 
   app-reverb:
-    <<: *laravel-app-common
+    <<: *obs-controller-app-common
     container_name: app-reverb
     networks:
       - app-network
@@ -219,6 +242,45 @@ services:
     command: [ "php", "artisan", "reverb:start", "--host=0.0.0.0", "--port=8080" ]
     ports:
       - "8081:8080"
+
+  veristral-web:
+    <<: *veristral-app-common
+    container_name: veristral-web
+    environment:
+      RUN_MIGRATIONS: "true"
+    networks:
+      - app-network
+    command: [ "php", "artisan", "serve", "--host=0.0.0.0", "--port=8000" ]
+    ports:
+      - "8002:8000"
+    healthcheck:
+      test: [ "CMD-SHELL", "curl -fsS http://localhost:8000/up >/dev/null || exit 1" ]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 20s
+
+  veristral-queue:
+    <<: *veristral-app-common
+    container_name: veristral-queue
+    networks:
+      - app-network
+    depends_on:
+      veristral-web:
+        condition: service_healthy
+    command: [ "php", "artisan", "queue:listen", "--tries=1", "--timeout=0" ]
+
+  veristral-reverb:
+    <<: *veristral-app-common
+    container_name: veristral-reverb
+    networks:
+      - app-network
+    depends_on:
+      veristral-web:
+        condition: service_healthy
+    command: [ "php", "artisan", "reverb:start", "--host=0.0.0.0", "--port=8080" ]
+    ports:
+      - "8083:8080"
 
   workflows-worker:
     <<: *workflows-common
@@ -240,8 +302,7 @@ services:
     restart: "no"
     stdin_open: true
     tty: false
-    command:
-      [ "python", "workflows/debate_jsonl_to_temporal.py", "--address", "temporal:7233", "--input-jsonl", "-" ]
+    command: [ "python", "workflows/debate_jsonl_to_temporal.py", "--address", "temporal:7233", "--input-jsonl", "-" ]
 
 networks:
   app-network:
