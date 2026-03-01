@@ -116,7 +116,7 @@ services:
     networks:
       - temporal-network
     volumes:
-      - ./scripts:/scripts
+      - ./.infra/scripts:/scripts
     entrypoint: [ "/bin/sh" ]
     command: /scripts/setup-postgres-es.sh
 
@@ -142,7 +142,7 @@ services:
     ports:
       - '7233:7233'
     volumes:
-      - ./dynamicconfig:/etc/temporal/config/dynamicconfig
+      - ./.infra/dynamicconfig:/etc/temporal/config/dynamicconfig
     healthcheck:
       test: [ "CMD", "nc", "-z", "localhost", "7233" ]
       interval: 5s
@@ -163,7 +163,7 @@ services:
     networks:
       - temporal-network
     volumes:
-      - ./scripts:/scripts
+      - ./.infra/scripts:/scripts
     entrypoint: [ "/bin/sh" ]
     command: /scripts/create-namespace.sh
 
@@ -240,8 +240,7 @@ services:
     restart: "no"
     stdin_open: true
     tty: false
-    command:
-      [ "python", "workflows/debate_jsonl_to_temporal.py", "--address", "temporal:7233", "--input-jsonl", "-" ]
+    command: [ "python", "workflows/debate_jsonl_to_temporal.py", "--address", "temporal:7233", "--input-jsonl", "-" ]
 
 networks:
   app-network:
