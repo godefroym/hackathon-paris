@@ -155,7 +155,15 @@ async def run_per_sentence_bridge(
         gap_seconds: float,
     ) -> None:
         nonlocal submitted
-        computed_post_delay = max(0.0, video_delay_seconds - max(0.0, gap_seconds))
+        # Compute remaining delay as VIDEO_STREAM_DELAY minus the wall-clock
+        # time already elapsed since the sentence's STT timestamp.  This
+        # ensures the OBS overlay appears at exactly the right moment on
+        # stream regardless of pipeline processing time.
+        elapsed_since_stt = max(
+            0.0,
+            (datetime.now(timezone.utc) - item["payload_timestamp"]).total_seconds(),
+        )
+        computed_post_delay = max(0.0, video_delay_seconds - elapsed_since_stt)
         submitted += 1
         wf_id = build_workflow_id(args.workflow_id_prefix, submitted)
 

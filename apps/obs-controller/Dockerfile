@@ -34,7 +34,8 @@ COPY --from=node_runtime /usr/local/bin/node /usr/local/bin/node
 COPY --from=node_runtime /usr/local/lib/node_modules /usr/local/lib/node_modules
 
 RUN ln -sf /usr/local/lib/node_modules/npm/bin/npm-cli.js /usr/local/bin/npm \
-    && ln -sf /usr/local/lib/node_modules/npm/bin/npx-cli.js /usr/local/bin/npx
+    && ln -sf /usr/local/lib/node_modules/npm/bin/npx-cli.js /usr/local/bin/npx \
+    && npm install -g pnpm
 
 COPY . .
 COPY --from=composer_deps /var/www/html/vendor ./vendor
@@ -51,8 +52,8 @@ ENV VITE_APP_NAME=${VITE_APP_NAME} \
     VITE_REVERB_PORT=${VITE_REVERB_PORT} \
     VITE_REVERB_SCHEME=${VITE_REVERB_SCHEME}
 
-RUN npm install \
-    && npm run build \
+RUN pnpm install --frozen-lockfile \
+    && pnpm run build \
     && rm -rf node_modules
 
 COPY docker/entrypoint.sh /usr/local/bin/entrypoint

@@ -20,7 +20,7 @@ x-obs-controller-app-common: &obs-controller-app-common
     - ./apps/obs-controller/storage:/var/www/html/storage
     - ./apps/obs-controller/database:/var/www/html/database
   networks:
-    - app-network
+    - paris-network
   restart: unless-stopped
 
 x-veristral-app-common: &veristral-app-common
@@ -43,7 +43,7 @@ x-veristral-app-common: &veristral-app-common
     - ./apps/veristral/storage:/var/www/html/storage
     - ./apps/veristral/database:/var/www/html/database
   networks:
-    - app-network
+    - paris-network
   restart: unless-stopped
 
 x-workflows-common: &workflows-common
@@ -57,8 +57,7 @@ x-workflows-common: &workflows-common
   volumes:
     - ./:/workspace
   networks:
-    - temporal-network
-    - app-network
+    - paris-network
   restart: unless-stopped
 
 services:
@@ -71,7 +70,7 @@ services:
       POSTGRES_PASSWORD: temporal
       POSTGRES_USER: temporal
     networks:
-      - temporal-network
+      - paris-network
     volumes:
       - /var/lib/postgresql/data
     healthcheck:
@@ -95,7 +94,7 @@ services:
       - ES_JAVA_OPTS=-Xms256m -Xmx256m
       - xpack.security.enabled=false
     networks:
-      - temporal-network
+      - paris-network
     healthcheck:
       test: [ "CMD-SHELL", "curl -f http://localhost:9200/_cluster/health?wait_for_status=yellow&timeout=1s || exit 1" ]
       interval: 5s
@@ -125,7 +124,7 @@ services:
       - ES_VERSION=v7
       - ES_VISIBILITY_INDEX=temporal_visibility_v1_dev
     networks:
-      - temporal-network
+      - paris-network
     volumes:
       - ./.infra/scripts:/scripts
     entrypoint: [ "/bin/sh" ]
@@ -149,7 +148,7 @@ services:
       - BIND_ON_IP=0.0.0.0
       - DYNAMIC_CONFIG_FILE_PATH=config/dynamicconfig/development-sql.yaml
     networks:
-      - temporal-network
+      - paris-network
     ports:
       - '7233:7233'
     volumes:
@@ -172,7 +171,7 @@ services:
       - TEMPORAL_ADDRESS=temporal:7233
       - DEFAULT_NAMESPACE=default
     networks:
-      - temporal-network
+      - paris-network
     volumes:
       - ./.infra/scripts:/scripts
     entrypoint: [ "/bin/sh" ]
@@ -188,7 +187,7 @@ services:
       - TEMPORAL_CORS_ORIGINS=http://localhost:3000
     image: temporalio/ui:${TEMPORAL_UI_VERSION}
     networks:
-      - temporal-network
+      - paris-network
     ports:
       - 8080:8080
 
@@ -198,7 +197,7 @@ services:
     environment:
       RUN_MIGRATIONS: "true"
     networks:
-      - app-network
+      - paris-network
     command: [ "php", "artisan", "serve", "--host=0.0.0.0", "--port=8000" ]
     ports:
       - "8000:8000"
@@ -213,7 +212,7 @@ services:
     <<: *obs-controller-app-common
     container_name: app-queue
     networks:
-      - app-network
+      - paris-network
     depends_on:
       app-web:
         condition: service_healthy
@@ -223,7 +222,7 @@ services:
     <<: *obs-controller-app-common
     container_name: app-reverb
     networks:
-      - app-network
+      - paris-network
     depends_on:
       app-web:
         condition: service_healthy
@@ -237,7 +236,7 @@ services:
     environment:
       RUN_MIGRATIONS: "true"
     networks:
-      - app-network
+      - paris-network
     command: [ "php", "artisan", "serve", "--host=0.0.0.0", "--port=8000" ]
     ports:
       - "8002:8000"
@@ -252,7 +251,7 @@ services:
     <<: *veristral-app-common
     container_name: veristral-queue
     networks:
-      - app-network
+      - paris-network
     depends_on:
       veristral-web:
         condition: service_healthy
@@ -262,7 +261,7 @@ services:
     <<: *veristral-app-common
     container_name: veristral-reverb
     networks:
-      - app-network
+      - paris-network
     depends_on:
       veristral-web:
         condition: service_healthy
@@ -295,39 +294,35 @@ services:
       FACT_CHECK_POST_URL: ${FACT_CHECK_POST_URL:-http://app-web:8000/api/stream/fact-check}
       VERISTRAL_POST_URL: ${VERISTRAL_POST_URL:-http://veristral-web:8000/api/facts}
     command: [ "python", "workflows/workers/transcript_worker.py", "--address", "temporal:7233" ]
-
-  workflows-launcher:
-    <<: *workflows-common
-    depends_on:
-      temporal-create-namespace:
-        condition: service_completed_successfully
-      workflows-debate-worker:
-        condition: service_started
-      workflows-transcript-worker:
-        condition: service_started
-    environment:
-      PERSONNE: ${PERSONNE:-}
-      SOURCE_VIDEO: ${SOURCE_VIDEO:-}
-      QUESTION_POSEE: ${QUESTION_POSEE:-}
-      INPUT_DEVICE_INDEX: ${INPUT_DEVICE_INDEX:-}
-    devices:
-      - /dev/snd:/dev/snd
-    restart: "no"
-    command:
-      - sh
-      - -c
-      - |
-        exec python workflows/pipeline.py \
-          --address temporal:7233 \
-          ${PERSONNE:+--personne "$PERSONNE"} \
-          ${SOURCE_VIDEO:+--source-video "$SOURCE_VIDEO"} \
-          ${QUESTION_POSEE:+--question-posee "$QUESTION_POSEE"} \
-          ${INPUT_DEVICE_INDEX:+--input-device-index "$INPUT_DEVICE_INDEX"}
+  # workflows-launcher:
+  #   <<: *workflows-common
+  #   depends_on:
+  #     temporal-create-namespace:
+  #       condition: service_completed_successfully
+  #     workflows-debate-worker:
+  #       condition: service_started
+  #     workflows-transcript-worker:
+  #       condition: service_started
+  #   environment:
+  #     PERSONNE: ${PERSONNE:-}
+  #     SOURCE_VIDEO: ${SOURCE_VIDEO:-}
+  #     QUESTION_POSEE: ${QUESTION_POSEE:-}
+  #     INPUT_DEVICE_INDEX: ${INPUT_DEVICE_INDEX:-}
+  #   devices:
+  #     - /dev/snd:/dev/snd
+  #   restart: "no"
+  #   command:
+  #     - sh
+  #     - -c
+  #     - |
+  #       exec python workflows/pipeline.py \
+  #         --address temporal:7233 \
+  #         ${PERSONNE:+--personne "$PERSONNE"} \
+  #         ${SOURCE_VIDEO:+--source-video "$SOURCE_VIDEO"} \
+  #         ${QUESTION_POSEE:+--question-posee "$QUESTION_POSEE"} \
+  #         ${INPUT_DEVICE_INDEX:+--input-device-index "$INPUT_DEVICE_INDEX"}
 
 networks:
-  app-network:
+  paris-network:
     driver: bridge
-    name: app-network
-  temporal-network:
-    driver: bridge
-    name: temporal-network
+    name: paris-network

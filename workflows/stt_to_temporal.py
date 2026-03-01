@@ -442,13 +442,20 @@ async def run_bridge(
             _signal_dispatch_tasks[:] = [t for t in _signal_dispatch_tasks if not t.done()]
 
         # ── Submit new batch and register its result task ─────────────────────
+        # Subtract the wall-clock time already elapsed since the first sentence
+        # of the batch so the OBS overlay appears at the right moment on stream
+        # (VIDEO_STREAM_DELAY seconds after the speech was captured).
+        _elapsed_since_window_start = max(
+            0.0, (datetime.now(timezone.utc) - window_start).total_seconds()
+        )
+        _adjusted_post_delay = max(0.0, args.video_delay_seconds - _elapsed_since_window_start)
         result_task = await submit_batch(
             client=client,
             batch_sentences=list(buffer),
             window_start=window_start,
             window_end=window_end,
             source_video=args.source_video,
-            post_delay_seconds=args.video_delay_seconds,
+            post_delay_seconds=_adjusted_post_delay,
             analysis_timeout_seconds=args.analysis_timeout_seconds,
             task_queue=args.task_queue,
             workflow_id_prefix=args.workflow_id_prefix,

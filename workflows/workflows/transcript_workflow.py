@@ -111,7 +111,7 @@ class TranscriptBatchWorkflow:
                 retry_policy=_EXTRACTION_RETRY,
             )
         except Exception as exc:  # noqa: BLE001
-            workflow.logger.error("Claim extraction failed", error=str(exc))
+            workflow.logger.error("Claim extraction failed: %s", str(exc))
             return {
                 "accepted": True,
                 "error": str(exc),
