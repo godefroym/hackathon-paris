@@ -27,12 +27,16 @@ output the same JSON schema used by your existing Temporal pipeline.
   "metadata": {
     "source_video": "TF1 20h",
     "timestamp_elapsed": "12:45",
+    "timestamp_start": "2026-03-01T10:01:58.123Z",
+    "timestamp_end": "2026-03-01T10:02:03.456Z",
     "timestamp": "2026-03-01T10:02:03.456Z"
   }
 }
 ```
 
 `affirmation` keeps a sliding window of the latest complete phrases (`--recent-window`, default `3`).
+`metadata.timestamp_start` is the estimated phrase start used by the Temporal launcher
+to keep post timing close to `VIDEO_DELAY_SECONDS` from speech start.
 
 ## Install
 

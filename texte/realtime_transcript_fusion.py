@@ -12,7 +12,7 @@ import sys
 import unicodedata
 from collections import deque
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import AsyncIterator, TextIO
 from urllib.parse import urlencode
@@ -69,6 +69,7 @@ LOADED_ENV_PATH = load_env_from_project_root()
 class CandidateUtterance:
     provider: str
     text: str
+    start_timestamp: datetime | None
     timestamp: datetime
 
 
@@ -306,6 +307,11 @@ def extract_message_text(content: object) -> str:
 
 def word_count(text: str) -> int:
     return len(re.findall(r"\w+", text, flags=re.UNICODE))
+
+
+def estimate_phrase_duration_seconds(text: str) -> float:
+    words = max(1, word_count(text))
+    return max(0.7, min(8.0, words / 2.8))
 
 
 CLEANUP_STOPWORDS = {
@@ -691,8 +697,10 @@ async def run_mistral_stream(
     events: asyncio.Queue[CandidateUtterance | ProviderClosed],
 ) -> None:
     pending = ""
+    pending_start: datetime | None = None
     full_text = ""
     audio_format = AudioFormat(encoding="pcm_s16le", sample_rate=sample_rate)
+    start_compensation = timedelta(milliseconds=max(0, int(delay_ms)))
     try:
         async for event in client.audio.realtime.transcribe_stream(
             audio_stream=audio_stream,
@@ -704,17 +712,30 @@ async def run_mistral_stream(
                 print("[mistral] session connected", file=sys.stderr, flush=True)
                 continue
             if isinstance(event, TranscriptionStreamTextDelta):
+                event_time = datetime.now(timezone.utc)
                 full_text += event.text
+                if pending_start is None and event.text.strip():
+                    pending_start = event_time - start_compensation
                 pending += event.text
                 complete_sentences, pending = split_complete_sentences(pending)
                 for sentence in complete_sentences:
+                    sentence_start = pending_start or (event_time - start_compensation)
+                    duration_based_start = event_time - timedelta(
+                        seconds=estimate_phrase_duration_seconds(sentence)
+                    )
+                    if duration_based_start < sentence_start:
+                        sentence_start = duration_based_start
                     await events.put(
                         CandidateUtterance(
                             provider="mistral",
                             text=sentence,
-                            timestamp=datetime.now(timezone.utc),
+                            start_timestamp=sentence_start,
+                            timestamp=event_time,
                         )
                     )
+                    pending_start = event_time - start_compensation
+                if not pending.strip():
+                    pending_start = None
                 continue
             if isinstance(event, TranscriptionStreamDone):
                 return
@@ -818,11 +839,15 @@ async def run_elevenlabs_stream(
                 text = str(message.get("text", "")).strip()
                 if not text:
                     continue
+                event_time = datetime.now(timezone.utc)
+                estimated_duration_seconds = estimate_phrase_duration_seconds(text)
                 await events.put(
                     CandidateUtterance(
                         provider="elevenlabs",
                         text=text,
-                        timestamp=datetime.now(timezone.utc),
+                        start_timestamp=event_time
+                        - timedelta(seconds=estimated_duration_seconds),
+                        timestamp=event_time,
                     )
                 )
                 continue
@@ -886,6 +911,7 @@ async def fusion_export_loop(
     async def emit_sentence(
         sentence: str,
         ts: datetime,
+        phrase_start_ts: datetime | None,
         provider: str,
         reason: str,
         mistral_text: str,
@@ -934,8 +960,11 @@ async def fusion_export_loop(
         fused_recent_sentences.append(final_sentence)
         if normalized:
             recent_emits.append((ts, normalized))
+        start_ts = phrase_start_ts or ts
+        if start_ts > ts:
+            start_ts = ts
         merged_affirmation = " ".join(fused_recent_sentences)
-        elapsed_seconds = int((ts - start_time).total_seconds())
+        elapsed_seconds = int((start_ts - start_time).total_seconds())
         mm = elapsed_seconds // 60
         ss = elapsed_seconds % 60
         payload = {
@@ -946,6 +975,9 @@ async def fusion_export_loop(
             "metadata": {
                 "source_video": source_video,
                 "timestamp_elapsed": f"{mm:02d}:{ss:02d}",
+                "timestamp_start": format_utc_iso_millis(start_ts),
+                "timestamp_end": format_utc_iso_millis(ts),
+                # Backward-compatible key: keep "timestamp" as the phrase end.
                 "timestamp": format_utc_iso_millis(ts),
             },
         }
@@ -980,7 +1012,19 @@ async def fusion_export_loop(
                         prefer_latin_script=prefer_latin_script,
                     )
                     ts = m.timestamp if m.timestamp >= e.timestamp else e.timestamp
-                    await emit_sentence(sentence, ts, winner, reason, m.text, e.text)
+                    candidate_starts = [
+                        c for c in (m.start_timestamp, e.start_timestamp) if c is not None
+                    ]
+                    phrase_start_ts = min(candidate_starts) if candidate_starts else None
+                    await emit_sentence(
+                        sentence,
+                        ts,
+                        phrase_start_ts,
+                        winner,
+                        reason,
+                        m.text,
+                        e.text,
+                    )
                     continue
 
                 if skew < -pair_max_skew_seconds:
@@ -988,7 +1032,15 @@ async def fusion_export_loop(
                     if age < solo_wait_seconds:
                         break
                     pending["mistral"].popleft()
-                    await emit_sentence(m.text, m.timestamp, "mistral", "solo_timeout", m.text, "")
+                    await emit_sentence(
+                        m.text,
+                        m.timestamp,
+                        m.start_timestamp,
+                        "mistral",
+                        "solo_timeout",
+                        m.text,
+                        "",
+                    )
                     continue
 
                 if skew > pair_max_skew_seconds:
@@ -996,7 +1048,15 @@ async def fusion_export_loop(
                     if age < solo_wait_seconds:
                         break
                     pending["elevenlabs"].popleft()
-                    await emit_sentence(e.text, e.timestamp, "elevenlabs", "solo_timeout", "", e.text)
+                    await emit_sentence(
+                        e.text,
+                        e.timestamp,
+                        e.start_timestamp,
+                        "elevenlabs",
+                        "solo_timeout",
+                        "",
+                        e.text,
+                    )
                     continue
 
                 break
@@ -1012,9 +1072,25 @@ async def fusion_export_loop(
                 pending[provider].popleft()
                 reason = "solo_other_closed" if other_providers.issubset(closed_providers) else "solo_timeout"
                 if provider == "mistral":
-                    await emit_sentence(item.text, item.timestamp, provider, reason, item.text, "")
+                    await emit_sentence(
+                        item.text,
+                        item.timestamp,
+                        item.start_timestamp,
+                        provider,
+                        reason,
+                        item.text,
+                        "",
+                    )
                 else:
-                    await emit_sentence(item.text, item.timestamp, provider, reason, "", item.text)
+                    await emit_sentence(
+                        item.text,
+                        item.timestamp,
+                        item.start_timestamp,
+                        provider,
+                        reason,
+                        "",
+                        item.text,
+                    )
 
     while True:
         now = datetime.now(timezone.utc)

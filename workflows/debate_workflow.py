@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 from __future__ import annotations
 
-from datetime import timedelta
+from datetime import datetime, timedelta, timezone
 from typing import Any
 
 from temporalio import workflow
@@ -31,6 +31,27 @@ def _claim_text_from_current_json(current_json: dict[str, Any]) -> str:
 
 def _is_http_url(value: str) -> bool:
     return value.startswith("http://") or value.startswith("https://")
+
+
+def _parse_utc_iso(value: Any) -> datetime | None:
+    if not isinstance(value, str):
+        return None
+    raw = value.strip()
+    if not raw:
+        return None
+    try:
+        parsed = datetime.fromisoformat(raw.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    if parsed.tzinfo is None:
+        return parsed.replace(tzinfo=timezone.utc)
+    return parsed.astimezone(timezone.utc)
+
+
+def _format_utc_iso_millis(value: datetime) -> str:
+    return value.astimezone(timezone.utc).isoformat(timespec="milliseconds").replace(
+        "+00:00", "Z"
+    )
 
 
 def _collect_sources(analysis_result: dict[str, Any]) -> list[dict[str, str]]:
@@ -244,6 +265,36 @@ class DebateJsonNoopWorkflow:
             phrases = last_minute_json.get("phrases")
             if isinstance(phrases, list):
                 last_minute_phrases = [p for p in phrases if isinstance(p, str)]
+
+        metadata = current_json.get("metadata") if isinstance(current_json, dict) else None
+        phrase_start_raw = ""
+        phrase_end_raw = ""
+        phrase_start_dt: datetime | None = None
+        if isinstance(metadata, dict):
+            phrase_start_raw = str(metadata.get("timestamp_start", "")).strip()
+            phrase_end_raw = str(
+                metadata.get("timestamp_end") or metadata.get("timestamp") or ""
+            ).strip()
+            phrase_start_dt = _parse_utc_iso(phrase_start_raw)
+
+        target_post_dt: datetime | None = None
+        if phrase_start_dt is not None:
+            target_post_dt = phrase_start_dt + timedelta(seconds=delay_before_post)
+
+        posted_at_raw = ""
+        posted_at_dt: datetime | None = None
+        if isinstance(post_result, dict):
+            posted_at_raw = str(post_result.get("posted_at_utc", "")).strip()
+            posted_at_dt = _parse_utc_iso(posted_at_raw)
+
+        measured_delay_from_start_seconds: float | None = None
+        delay_error_seconds: float | None = None
+        if phrase_start_dt is not None and posted_at_dt is not None:
+            measured_delay_from_start_seconds = max(
+                0.0, (posted_at_dt - phrase_start_dt).total_seconds()
+            )
+            delay_error_seconds = measured_delay_from_start_seconds - delay_before_post
+
         return {
             "accepted": True,
             "requested_delay_before_post_seconds": delay_before_post,
@@ -257,4 +308,14 @@ class DebateJsonNoopWorkflow:
             "analysis_result": analysis_result,
             "post_payload_preview": post_payload,
             "post_result": post_result,
+            "timing_debug": {
+                "phrase_start_timestamp": phrase_start_raw,
+                "phrase_end_timestamp": phrase_end_raw,
+                "target_post_timestamp": (
+                    _format_utc_iso_millis(target_post_dt) if target_post_dt else ""
+                ),
+                "posted_at_utc": posted_at_raw,
+                "measured_delay_from_start_seconds": measured_delay_from_start_seconds,
+                "delay_error_seconds": delay_error_seconds,
+            },
         }

@@ -19,7 +19,8 @@ For each transcript line, the launcher sends:
   phrases from the last 60 seconds.
 
 Per-line post delay is computed from an absolute target timestamp:
-- `estimated_phrase_start = ts_previous` (fallback: `ts_current` for first line)
+- `estimated_phrase_start = metadata.timestamp_start` when available
+- fallback (legacy JSON): previous phrase end timestamp
 - `target_post_timestamp = estimated_phrase_start + VIDEO_STREAM_DELAY_SECONDS`
 - `computed_post_delay = target_post_timestamp - now_at_workflow_submission`
 - clamped to `>= 0`
