@@ -1,4 +1,21 @@
 #!/usr/bin/env python3
+"""Real-time microphone transcription via Mistral Voxtral.
+
+Captures PCM audio from the default (or chosen) input device, streams it to
+Mistral's Voxtral realtime endpoint, and emits one JSON sentence dict per
+completed sentence — either to stdout/file (standalone mode) or to an
+``asyncio.Queue`` (library mode used by pipeline.py).
+
+Standalone usage
+----------------
+    python realtime_transcript.py --personne "Jean Dupont" --source-video "TF1 20h"
+
+Library usage (in-process queue, no pipe)
+-----------------------------------------
+    from realtime_transcript import produce_sentences
+    q: asyncio.Queue[dict | None] = asyncio.Queue(maxsize=200)
+    await produce_sentences(..., sentence_queue=q)
+"""
 from __future__ import annotations
 
 import argparse
@@ -21,14 +38,13 @@ from mistralai.models import (
     TranscriptionStreamTextDelta,
 )
 
-# Laisse vide et remplis ta cle ici si tu ne veux pas utiliser MISTRAL_API_KEY.
-API_KEY = "TIuRHLC1ouC0hCWArOtdREBZZ3azZych"
-
 
 @dataclass
 class StreamState:
-    fast_full_text: str = ""
     slow_full_text: str = ""
+
+
+# ── PyAudio helpers ────────────────────────────────────────────────────────────
 
 
 def load_pyaudio():
@@ -151,6 +167,47 @@ async def broadcast_microphone(
                         break
 
 
+# ── STT stream ────────────────────────────────────────────────────────────────
+
+
+async def run_stream(
+    *,
+    client: Mistral,
+    model: str,
+    delay_ms: int,
+    audio_stream: AsyncIterator[bytes],
+    audio_format: AudioFormat,
+    state: StreamState,
+    updates: asyncio.Queue[None],
+) -> None:
+    """Run a single Voxtral realtime stream and accumulate text into *state*."""
+    async for event in client.audio.realtime.transcribe_stream(
+        audio_stream=audio_stream,
+        model=model,
+        audio_format=audio_format,
+        target_streaming_delay_ms=delay_ms,
+    ):
+        if isinstance(event, RealtimeTranscriptionSessionCreated):
+            print(
+                f"[stt] session connectée ({delay_ms}ms)",
+                file=sys.stderr,
+                flush=True,
+            )
+        elif isinstance(event, TranscriptionStreamTextDelta):
+            state.slow_full_text += event.text
+            if updates.empty():
+                updates.put_nowait(None)
+        elif isinstance(event, TranscriptionStreamDone):
+            return
+        elif isinstance(event, RealtimeTranscriptionError):
+            raise RuntimeError(str(event.error))
+        elif isinstance(event, UnknownRealtimeEvent):
+            continue
+
+
+# ── Sentence splitter & export ────────────────────────────────────────────────
+
+
 def split_complete_sentences(text: str) -> tuple[list[str], str]:
     """Split on sentence endings (.?! or newline), return (complete, remainder)."""
     complete: list[str] = []
@@ -175,48 +232,6 @@ def format_utc_iso_millis(dt: datetime) -> str:
     )
 
 
-async def run_stream(
-    *,
-    client: Mistral,
-    model: str,
-    delay_ms: int,
-    audio_stream: AsyncIterator[bytes],
-    audio_format: AudioFormat,
-    state: StreamState,
-    updates: asyncio.Queue[None],
-    is_fast: bool,
-    show_fast_preview: bool,
-) -> None:
-    async for event in client.audio.realtime.transcribe_stream(
-        audio_stream=audio_stream,
-        model=model,
-        audio_format=audio_format,
-        target_streaming_delay_ms=delay_ms,
-    ):
-        if isinstance(event, RealtimeTranscriptionSessionCreated):
-            lane = "fast" if is_fast else "slow"
-            print(
-                f"[{lane}] session connectee ({delay_ms}ms)",
-                file=sys.stderr,
-                flush=True,
-            )
-        elif isinstance(event, TranscriptionStreamTextDelta):
-            if is_fast:
-                state.fast_full_text += event.text
-                if show_fast_preview and event.text:
-                    print(event.text, end="", file=sys.stderr, flush=True)
-            else:
-                state.slow_full_text += event.text
-                if updates.empty():
-                    updates.put_nowait(None)
-        elif isinstance(event, TranscriptionStreamDone):
-            return
-        elif isinstance(event, RealtimeTranscriptionError):
-            raise RuntimeError(str(event.error))
-        elif isinstance(event, UnknownRealtimeEvent):
-            continue
-
-
 async def json_export_loop(
     *,
     personne: str,
@@ -225,11 +240,18 @@ async def json_export_loop(
     state: StreamState,
     updates: asyncio.Queue[None],
     recent_window: int,
-    output: TextIO,
+    output: "TextIO | None" = None,
+    sentence_queue: "asyncio.Queue[dict | None] | None" = None,
 ) -> None:
+    """Consume transcription updates, split into sentences, and emit them.
+
+    Each complete sentence is:
+    - written as a JSON line to *output* if provided (standalone / log-file mode)
+    - pushed as a dict into *sentence_queue* if provided (pipeline / in-process mode)
+    """
     consumed = 0
     pending = ""
-    recent_sentences = deque(maxlen=recent_window)
+    recent_sentences: deque[str] = deque(maxlen=recent_window)
     start_time = datetime.now(timezone.utc)
 
     while True:
@@ -250,35 +272,114 @@ async def json_export_loop(
             mm = total_seconds // 60
             ss = total_seconds % 60
             merged_affirmation = " ".join(recent_sentences)
-            emit_json_line(
-                {
-                    "personne": personne,
-                    "question_posee": question_posee,
-                    "affirmation": merged_affirmation,
-                    "affirmation_courante": sentence,
-                    "metadata": {
-                        "source_video": source_video,
-                        # Keep relative timer for display if needed.
-                        "timestamp_elapsed": f"{mm:02d}:{ss:02d}",
-                        # Precise timestamp used for downstream temporal windows.
-                        "timestamp": format_utc_iso_millis(now_utc),
-                    },
+            payload: dict[str, object] = {
+                "personne": personne,
+                "question_posee": question_posee,
+                "affirmation": merged_affirmation,
+                "affirmation_courante": sentence,
+                "metadata": {
+                    "source_video": source_video,
+                    "timestamp_elapsed": f"{mm:02d}:{ss:02d}",
+                    "timestamp": format_utc_iso_millis(now_utc),
                 },
-                output,
-            )
+            }
+            if output is not None:
+                emit_json_line(payload, output)
+            if sentence_queue is not None:
+                await sentence_queue.put(payload)
+
+
+# ── Public library coroutine ──────────────────────────────────────────────────
+
+
+async def produce_sentences(
+    *,
+    api_key: str,
+    transcribe_model: str,
+    sample_rate: int,
+    chunk_duration_ms: int,
+    slow_delay_ms: int,
+    input_device_index: "int | None",
+    personne: str,
+    question_posee: str,
+    source_video: str,
+    recent_window: int,
+    sentence_queue: "asyncio.Queue[dict | None]",
+    output: "TextIO | None" = None,
+) -> None:
+    """Capture mic audio, transcribe via Voxtral, push sentence dicts to *sentence_queue*.
+
+    Sends a ``None`` sentinel when finished so the consumer can stop iterating.
+    If *output* is provided, JSON lines are also written there as a side-channel log.
+    """
+    client = Mistral(api_key=api_key)
+    audio_format = AudioFormat(encoding="pcm_s16le", sample_rate=sample_rate)
+    state = StreamState()
+
+    audio_queue: asyncio.Queue[bytes | None] = asyncio.Queue(maxsize=50)
+    updates: asyncio.Queue[None] = asyncio.Queue(maxsize=1)
+
+    broadcaster = asyncio.create_task(
+        broadcast_microphone(
+            sample_rate=sample_rate,
+            chunk_duration_ms=chunk_duration_ms,
+            input_device_index=input_device_index,
+            queues=(audio_queue,),
+        )
+    )
+    slow_task = asyncio.create_task(
+        run_stream(
+            client=client,
+            model=transcribe_model,
+            delay_ms=slow_delay_ms,
+            audio_stream=queue_audio_iter(audio_queue),
+            audio_format=audio_format,
+            state=state,
+            updates=updates,
+        )
+    )
+    export_task = asyncio.create_task(
+        json_export_loop(
+            personne=personne,
+            question_posee=question_posee,
+            source_video=source_video,
+            state=state,
+            updates=updates,
+            recent_window=recent_window,
+            output=output,
+            sentence_queue=sentence_queue,
+        )
+    )
+
+    tasks = [broadcaster, slow_task, export_task]
+    try:
+        done, _ = await asyncio.wait(tasks, return_when=asyncio.FIRST_EXCEPTION)
+        for task in done:
+            exc = task.exception()
+            if exc is not None:
+                raise exc
+    finally:
+        for task in tasks:
+            task.cancel()
+        await asyncio.gather(*tasks, return_exceptions=True)
+        # Signal the consumer that no more sentences are coming.
+        await sentence_queue.put(None)
+
+
+# ── CLI ────────────────────────────────────────────────────────────────────────
 
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description=(
-            "Transcription realtime dual-delay (Mistral) vers JSONL "
+            "Transcription realtime (Mistral Voxtral) vers JSONL "
             "(une ligne JSON par phrase complete)."
         )
     )
     parser.add_argument(
         "--api-key",
-        default=API_KEY or os.environ.get("MISTRAL_API_KEY", ""),
-        help="Mistral API key",
+        default=os.environ.get("MISTRAL_API_KEY", ""),
+        help="Mistral API key (default: env MISTRAL_API_KEY)",
     )
     parser.add_argument(
         "--transcribe-model",
@@ -299,16 +400,10 @@ def parse_args() -> argparse.Namespace:
         help="Taille chunk micro en ms",
     )
     parser.add_argument(
-        "--fast-delay-ms",
-        type=int,
-        default=240,
-        help="Delai stream rapide (ms)",
-    )
-    parser.add_argument(
         "--slow-delay-ms",
         type=int,
         default=2400,
-        help="Delai stream stable (ms)",
+        help="Delai stream realtime (ms)",
     )
     parser.add_argument(
         "--input-device-index",
@@ -351,11 +446,6 @@ def parse_args() -> argparse.Namespace:
         help="Fichier JSONL de sortie (si vide: stdout)",
     )
     parser.add_argument(
-        "--hide-fast-preview",
-        action="store_true",
-        help="Masquer la transcription brute du stream rapide (stderr)",
-    )
-    parser.add_argument(
         "--list-devices",
         action="store_true",
         help="Lister les micros d'entree et quitter",
@@ -363,16 +453,20 @@ def parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
+# ── Standalone entry-point ────────────────────────────────────────────────────
+
+
 async def run() -> int:
     args = parse_args()
+
     if args.list_devices:
         print(json.dumps(list_input_devices(), ensure_ascii=False, indent=2))
         return 0
 
-    if not args.api_key:
+    api_key = args.api_key
+    if not api_key:
         print(
-            "API key manquante: remplis `API_KEY = \"...\"` dans le script "
-            "ou exporte MISTRAL_API_KEY.",
+            "API key manquante: exporte MISTRAL_API_KEY ou utilise --api-key.",
             file=sys.stderr,
         )
         return 1
@@ -386,92 +480,49 @@ async def run() -> int:
     personne = args.personne or mic_name
 
     output: TextIO
-    output_file: TextIO | None = None
+    output_file: "TextIO | None" = None
     if args.output_jsonl:
         output_file = open(args.output_jsonl, "a", encoding="utf-8", buffering=1)
         output = output_file
     else:
         output = sys.stdout
 
-    print(
-        f"[info] source micro: {mic_device_name}",
-        file=sys.stderr,
-        flush=True,
-    )
-    print(
-        f"[info] personne JSON: {personne}",
-        file=sys.stderr,
-        flush=True,
-    )
+    print(f"[info] source micro: {mic_device_name}", file=sys.stderr, flush=True)
+    print(f"[info] personne JSON: {personne}", file=sys.stderr, flush=True)
 
-    client = Mistral(api_key=args.api_key)
-    audio_format = AudioFormat(encoding="pcm_s16le", sample_rate=args.sample_rate)
-    state = StreamState()
+    # Standalone mode: write directly to output via the output param.
+    # We still need a queue to satisfy produce_sentences; drain it silently.
+    dummy_queue: asyncio.Queue[dict | None] = asyncio.Queue(maxsize=200)
 
-    fast_queue: asyncio.Queue[bytes | None] = asyncio.Queue(maxsize=50)
-    slow_queue: asyncio.Queue[bytes | None] = asyncio.Queue(maxsize=50)
-    updates: asyncio.Queue[None] = asyncio.Queue(maxsize=1)
+    async def _drain() -> None:
+        while True:
+            item = await dummy_queue.get()
+            if item is None:
+                break
 
-    broadcaster = asyncio.create_task(
-        broadcast_microphone(
+    drain_task = asyncio.create_task(_drain())
+    try:
+        await produce_sentences(
+            api_key=api_key,
+            transcribe_model=args.transcribe_model,
             sample_rate=args.sample_rate,
             chunk_duration_ms=args.chunk_duration_ms,
+            slow_delay_ms=args.slow_delay_ms,
             input_device_index=args.input_device_index,
-            queues=(fast_queue, slow_queue),
-        )
-    )
-    fast_task = asyncio.create_task(
-        run_stream(
-            client=client,
-            model=args.transcribe_model,
-            delay_ms=args.fast_delay_ms,
-            audio_stream=queue_audio_iter(fast_queue),
-            audio_format=audio_format,
-            state=state,
-            updates=updates,
-            is_fast=True,
-            show_fast_preview=not args.hide_fast_preview,
-        )
-    )
-    slow_task = asyncio.create_task(
-        run_stream(
-            client=client,
-            model=args.transcribe_model,
-            delay_ms=args.slow_delay_ms,
-            audio_stream=queue_audio_iter(slow_queue),
-            audio_format=audio_format,
-            state=state,
-            updates=updates,
-            is_fast=False,
-            show_fast_preview=False,
-        )
-    )
-    export_task = asyncio.create_task(
-        json_export_loop(
             personne=personne,
             question_posee=args.question_posee,
             source_video=args.source_video,
-            state=state,
-            updates=updates,
             recent_window=args.recent_window,
+            sentence_queue=dummy_queue,
             output=output,
         )
-    )
-
-    tasks = [broadcaster, fast_task, slow_task, export_task]
-    try:
-        done, _ = await asyncio.wait(tasks, return_when=asyncio.FIRST_EXCEPTION)
-        for task in done:
-            exc = task.exception()
-            if exc is not None:
-                raise exc
-        return 0
+        await drain_task
     finally:
-        for task in tasks:
-            task.cancel()
-        await asyncio.gather(*tasks, return_exceptions=True)
+        drain_task.cancel()
         if output_file is not None:
             output_file.close()
+
+    return 0
 
 
 def main() -> int:

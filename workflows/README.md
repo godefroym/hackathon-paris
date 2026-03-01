@@ -7,26 +7,30 @@ verdicts to a downstream service. Orchestrated with **Temporal** for reliability
 ## How It Works
 
 ```
-                          ┌──────────────────────────────────┐
-                          │        Live Audio Stream         │
-                          └───────────────┬──────────────────┘
-                                          │
-                                          ▼
-                          ┌──────────────────────────────────┐
-                          │  realtime_transcript.py (STT)    │
-                          │  Captures mic → sentences JSONL  │
-                          └───────────────┬──────────────────┘
-                                          │  stdout (JSONL)
-                                          ▼
-                          ┌──────────────────────────────────┐
-                          │  debate_jsonl_to_temporal.py      │
-                          │  Reads JSONL → starts 1 Temporal │
-                          │  workflow per sentence            │
-                          └───────────────┬──────────────────┘
-                                          │
-                       ┌──────────────────┼──────────────────┐
-                       │       Temporal Server (durability)   │
-                       └──────────────────┼──────────────────┘
+                     ┌────────────────────────────────────────────────────┐
+                     │               pipeline.py (single process)         │
+                     │                                                    │
+                     │  ┌──────────────────────────┐                     │
+                     │  │  produce_sentences()      │                     │
+                     │  │  realtime_transcript.py   │                     │
+                     │  │                           │                     │
+                     │  │  mic → Voxtral → dicts    │                     │
+                     │  └───────────┬───────────────┘                     │
+                     │              │ asyncio.Queue[dict]                  │
+                     │              ▼ (in-process, no pipe)               │
+                     │  ┌──────────────────────────┐                     │
+                     │  │  run_bridge()             │                     │
+                     │  │  stt_to_temporal.py       │                     │
+                     │  │                           │                     │
+                     │  │  buffer ~20 s → batch     │                     │
+                     │  └───────────┬───────────────┘                     │
+                     └─────────────┼───────────────────────────────────────┘
+                                   │  Temporal SDK
+                                   ▼
+                       ┌──────────────────────────┐
+                       │     Temporal Server       │
+                       │     (durability)          │
+                       └────────────┬─────────────┘
                                           │
                                           ▼
                         ┌─────────────────────────────────────┐
@@ -77,14 +81,25 @@ verdicts to a downstream service. Orchestrated with **Temporal** for reliability
 
 ### Pipeline Steps
 
-1. **Transcription** — `realtime_transcript.py` captures live audio and emits
-   one JSONL line per detected sentence (speaker, claim, timestamp).
+1. **Entrypoint** — `pipeline.py` starts two concurrent asyncio tasks in a
+   single process and connects them via an `asyncio.Queue[dict]` (no OS pipe,
+   no JSON serialization round-trip).
 
-2. **Ingestion** — `debate_jsonl_to_temporal.py` reads the JSONL stream
-   (file or stdin) and starts one Temporal workflow per sentence with context
-   from the last ~60 seconds of conversation.
+2. **Transcription** — `produce_sentences()` in `realtime_transcript.py`
+   captures live audio, streams it to Mistral Voxtral (single 2 400 ms-delay
+   session), splits the text into complete sentences, and pushes each sentence
+   dict into the shared queue.
 
-3. **Temporal Workflow** (`debate_workflow.py`) orchestrates four explicit steps,
+3. **Ingestion** (`--submission-mode batch`, default) — `run_bridge()` in
+   `stt_to_temporal.py` drains the queue, accumulates sentences over a ~20 s
+   window, and submits one `TranscriptBatchWorkflow` per window to Temporal.
+   The batch workflow extracts checkworthy claims (Ministral) and fans out to
+   one `DebateJsonNoopWorkflow` per claim.
+
+   Alternative: `--submission-mode per-sentence` submits one
+   `DebateJsonNoopWorkflow` directly per sentence (no claim-extraction step).
+
+4. **Temporal Workflow** (`debate_workflow.py`) orchestrates four explicit steps,
    each in its own method with a dedicated retry policy:
 
    | Step | Activity / action | Retry policy |
@@ -105,7 +120,7 @@ verdicts to a downstream service. Orchestrated with **Temporal** for reliability
      `_annotate_skipped`, `_post_result`, `_build_output`) so each concern can
      be read, tested, and modified independently.
 
-4. **Analysis** (`debate_activities.py`) runs Mistral AI agents:
+5. **Analysis** (`debate_activities.py`) runs Mistral AI agents:
    - **Routeur** — classifies the claim and selects which specialist agents to run
    - **Statistique** — verifies numeric claims via `web_search`
    - **Rhétorique** — detects evasion of the journalist's question
@@ -113,7 +128,7 @@ verdicts to a downstream service. Orchestrated with **Temporal** for reliability
    - **Contexte** — provides factual background context via `web_search`
    - **Éditeur** — synthesizes all reports into a TV-ready verdict (2 sentences)
 
-5. **Self-Correction** — heuristic first (keyword markers + number replacement),
+6. **Self-Correction** — heuristic first (keyword markers + number replacement),
    then LLM fallback. If the next sentence corrects the current one, the verdict
    is suppressed.
 
@@ -268,17 +283,22 @@ set_political_profile(my_profile)
 
 ```
 workflows/
-├── debate_config.py              # Shared constants (task queue, timeouts)
+├── pipeline.py                   # ★ Unified entrypoint (mic → Voxtral → Temporal)
+├── realtime_transcript.py        # Voxtral STT library (produce_sentences coroutine)
+├── stt_to_temporal.py            # Batch bridge library (run_bridge, sentences_from_*)
+├── debate_config.py              # Shared constants (task queues, timeouts)
 ├── .env                          # Local environment variables (git-ignored)
 ├── .env.example                  # Template for .env
 ├── pyproject.toml                # Python project (uv)
 │
 ├── workers/
-│   ├── debate_worker.py          # Temporal worker (registers workflow + activities)
-│   └── debate_jsonl_to_temporal.py  # JSONL reader → Temporal workflow starter
+│   ├── debate_worker.py          # Temporal worker for DebateJsonNoopWorkflow
+│   ├── transcript_worker.py      # Temporal worker for TranscriptBatchWorkflow
+│   └── debate_jsonl_to_temporal.py  # Legacy shim → utils/ingestion per-sentence bridge
 │
 ├── workflows/
-│   └── debate_workflow.py        # Temporal workflow orchestration
+│   ├── debate_workflow.py        # DebateJsonNoopWorkflow orchestration
+│   └── transcript_workflow.py    # TranscriptBatchWorkflow (claim extraction + fan-out)
 │
 ├── activities/
 │   ├── debate_activities.py      # Business logic: fact-check activities
@@ -289,6 +309,7 @@ workflows/
 │
 └── utils/
     ├── env.py                    # Loads workflows/.env
+    ├── ingestion.py              # Per-sentence bridge logic (run_per_sentence_bridge)
     ├── text.py                   # Extract affirmation from payloads
     ├── retry.py                  # Rate-limit detection + exponential backoff
     └── sources.py                # URL validation + domain normalization
@@ -348,37 +369,49 @@ source ingestion/.venv/bin/activate
 python scripts/mock_fact_check_receiver.py --port 8000
 ```
 
-### 3) Start the Temporal worker
+### 3) Start the Temporal workers
+
+Two workers are needed — one per workflow type:
 
 ```bash
+# Terminal A — handles TranscriptBatchWorkflow (claim extraction + fan-out)
+cd workflows
+uv run python workers/transcript_worker.py
+
+# Terminal B — handles DebateJsonNoopWorkflow (specialist pipeline + post)
 cd workflows
 uv run python workers/debate_worker.py
 ```
 
-The worker connects to Temporal on `localhost:7233` and listens on the
-`debate-json-task-queue` task queue.
+### 4) Live end-to-end (mic → fact-check → post)
 
-### 4) Submit a JSONL file
+Single process, no pipe:
 
 ```bash
 cd workflows
-uv run python workers/debate_jsonl_to_temporal.py \
-  --input-jsonl ../debate_stream.jsonl \
-  --video-delay-seconds 30
-```
-
-### 5) Live end-to-end (mic → fact-check → post)
-
-```bash
-cd ..
-source ingestion/.venv/bin/activate
-python ingestion/realtime_transcript.py \
-  --input-device-index 0 \
+uv run python pipeline.py \
   --personne "Valérie Pécresse" \
   --source-video "TF1 20h" \
-  --question-posee "" \
-| tee debate_stream.jsonl \
-| python workflows/workers/debate_jsonl_to_temporal.py --video-delay-seconds 30
+  --question-posee "Votre position sur l'immigration ?"
+```
+
+Optional flags:
+
+| Flag | Description |
+|---|---|
+| `--input-device-index N` | Specific mic (see `--list-devices`) |
+| `--output-jsonl FILE` | Log STT sentences to a file as a side-channel |
+| `--submission-mode per-sentence` | One `DebateJsonNoopWorkflow` per sentence (legacy mode) |
+| `--dry-run` | Print batches/sentences without connecting to Temporal |
+| `--list-devices` | Print available audio input devices and exit |
+
+### 5) File replay (no mic)
+
+```bash
+cd workflows
+uv run python pipeline.py \
+  --input-jsonl ../debate_stream.jsonl \
+  --dry-run
 ```
 
 ### 6) Quick smoke test (no Temporal)

@@ -1,37 +1,23 @@
 #!/usr/bin/env python3
 """STT-to-Temporal bridge.
 
-Reads the JSONL stream produced by realtime_transcript.py (one JSON object per
-completed sentence), accumulates sentences into time-based windows (~20 s or N
-sentences), and submits each window to a TranscriptBatchWorkflow on Temporal.
+Accumulates sentence dicts into time-based windows (~20 s or N sentences) and
+submits each window to a TranscriptBatchWorkflow on Temporal.
 
-The full pipeline:
+Sentence dicts arrive via an ``AsyncIterator[dict]``:
+- ``sentences_from_queue(q)``  — in-process queue fed by realtime_transcript
+                                  (used by pipeline.py — no OS pipe needed)
+- ``sentences_from_textio(h)`` — reads a TextIO handle line-by-line via
+                                  run_in_executor (file-replay or stdin mode)
 
-    realtime_transcript.py (mic → Voxtral STT)
-        |  JSONL stdout (one sentence per line)
-        ↓
-    stt_to_temporal.py   ← this script
-        |  Temporal workflow per ~20-second window
-        ↓
-    TranscriptBatchWorkflow
-        |  extract_claims activity (Ministral, fast)
-        ↓
-    DebateJsonNoopWorkflow × N  (one per checkworthy claim)
-        |  full specialist pipeline (stats / rhetorique / coherence / contexte)
-        ↓
-    POST /api/stream/fact-check
+Standalone usage (file replay):
+    python stt_to_temporal.py --input-jsonl /path/to/stt.jsonl
 
-Usage (pipe mode — most common):
-    python ingestion/realtime_transcript.py \\
-        --personne "Jean Dupont" \\
-        --question-posee "Quel est le bilan économique ?" | \\
-    python ingestion/stt_to_temporal.py
+Standalone usage (dry-run):
+    python stt_to_temporal.py --dry-run --input-jsonl /path/to/stt.jsonl
 
-Usage (file mode):
-    python ingestion/stt_to_temporal.py --input-jsonl /path/to/stt.jsonl
-
-Usage (dry-run, for testing without Temporal):
-    python ingestion/stt_to_temporal.py --dry-run < /path/to/stt.jsonl
+Preferred live usage — via pipeline.py (no pipe, single process):
+    python pipeline.py --personne "Jean Dupont" --source-video "TF1 20h"
 """
 from __future__ import annotations
 
@@ -43,7 +29,7 @@ import sys
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, TextIO
+from typing import Any, AsyncIterator, TextIO
 
 # Allow running as a script from repo root.
 _SCRIPT_DIR = Path(__file__).resolve().parent
@@ -215,6 +201,60 @@ def build_workflow_id(prefix: str, sequence: int) -> str:
     return f"{prefix}-{now}-{sequence:04d}-{suffix}"
 
 
+# ── Sentence source adapters ─────────────────────────────────────────────────
+
+
+async def sentences_from_queue(
+    q: "asyncio.Queue[dict | None]",
+) -> AsyncIterator[dict]:
+    """Yield sentence dicts from an in-process asyncio.Queue.
+
+    Stops when the producer pushes the ``None`` sentinel.
+    Used by pipeline.py so no OS pipe or JSON serialization round-trip is needed.
+    """
+    while True:
+        item = await q.get()
+        if item is None:
+            break
+        yield item
+
+
+async def sentences_from_textio(
+    handle: TextIO,
+) -> AsyncIterator[dict]:
+    """Yield parsed sentence dicts from a text stream (file or stdin).
+
+    readline() is wrapped in run_in_executor to avoid blocking the event loop.
+    Invalid JSON lines are logged and skipped.
+    """
+    loop = asyncio.get_running_loop()
+
+    def _read_line() -> "str | None":
+        try:
+            line = handle.readline()
+            return line if line else None  # empty string = EOF
+        except (EOFError, KeyboardInterrupt):
+            return None
+
+    while True:
+        line = await loop.run_in_executor(None, _read_line)
+        if line is None:
+            break
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            payload = json.loads(line)
+        except json.JSONDecodeError as exc:
+            print(
+                f"[stt→temporal] JSON invalide, ligne ignorée: {exc}",
+                file=sys.stderr,
+            )
+            continue
+        if isinstance(payload, dict):
+            yield payload
+
+
 # ── Batch submission ───────────────────────────────────────────────────────────
 
 
@@ -363,11 +403,11 @@ async def submit_batch(
 
 async def run_bridge(
     *,
-    input_handle: TextIO,
-    client: Client | None,
+    sentence_source: AsyncIterator[dict],
+    client: "Client | None",
     args: argparse.Namespace,
 ) -> int:
-    """Read JSONL stream, buffer sentences, flush windows to Temporal."""
+    """Read sentence dicts from *sentence_source*, buffer them, flush windows to Temporal."""
     buffer: list[dict[str, Any]] = []
     window_start: datetime | None = None
     sequence = 0
@@ -420,39 +460,7 @@ async def run_bridge(
         buffer = []
         window_start = None
 
-    loop = asyncio.get_running_loop()
-
-    def _read_line() -> str | None:
-        try:
-            line = input_handle.readline()
-            return line if line else None  # empty string = EOF
-        except (EOFError, KeyboardInterrupt):
-            return None
-
-    while True:
-        line = await loop.run_in_executor(None, _read_line)
-        if line is None:
-            # EOF — flush whatever remains in the buffer.
-            if buffer and window_start is not None:
-                await _flush(datetime.now(timezone.utc))
-            break
-
-        line = line.strip()
-        if not line:
-            continue
-
-        try:
-            payload = json.loads(line)
-        except json.JSONDecodeError as exc:
-            print(
-                f"[stt→temporal] JSON invalide, ligne ignorée: {exc}",
-                file=sys.stderr,
-            )
-            continue
-
-        if not isinstance(payload, dict):
-            continue
-
+    async for payload in sentence_source:
         sentence = normalize_sentence(payload)
         if not sentence["text"]:
             continue
@@ -478,6 +486,10 @@ async def run_bridge(
                 flush=True,
             )
             await _flush(sentence_time)
+
+    # Source exhausted — flush whatever remains in the buffer.
+    if buffer and window_start is not None:
+        await _flush(datetime.now(timezone.utc))
 
     return 0
 
@@ -521,7 +533,11 @@ async def run() -> int:
     )
 
     try:
-        return await run_bridge(input_handle=input_handle, client=client, args=args)
+        return await run_bridge(
+            sentence_source=sentences_from_textio(input_handle),
+            client=client,
+            args=args,
+        )
     finally:
         if should_close:
             input_handle.close()
