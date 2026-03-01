@@ -1,200 +1,421 @@
-🛡️ Vériscope - Hackathon Mistral AI 2026
-1. Description du Problème
-Dans le tumulte des campagnes électorales, le fact-checking traditionnel souffre d'un défaut majeur : l'asynchronisme. Une affirmation fausse est prononcée en direct, devient virale en quelques minutes, tandis que le démenti n'arrive que le lendemain.
+# 🛡️ Vériscope
 
-Le citoyen est exposé à trois types de distorsions :
+**Real-time AI fact-checking for live political debates, powered by Mistral AI.**
 
-La distorsion statistique : Manipulation de chiffres complexes (PIB, chômage) difficiles à vérifier instantanément.
+Vériscope captures a live TV debate audio stream, transcribes it in real time, runs multi-agent AI analysis on every claim, and overlays sourced verdicts on the broadcast — all within seconds.
 
-La distorsion rhétorique (Esquive) : La "langue de bois" où le candidat évite de répondre à une question précise.
+Built during the **Mistral AI Hackathon Paris 2026**.
 
-La distorsion de cohérence : Des retournements de veste rapides (moins de 6 mois) qui passent inaperçus dans le flux d'informations.
+## The Problem
 
-Le manque de contexte 
+Traditional fact-checking is asynchronous: a false claim goes viral in minutes, but the correction only arrives the next day. Citizens watching a live political debate have no immediate way to verify what is being said.
 
-Vériscope résout ce problème en proposant une "War Room" citoyenne capable d'analyser, de sourcer et de contextualiser le discours politique avec une latence inférieure à 10 secondes.
+Vériscope targets four types of distortion:
 
-2. L'Architecture Technique (Stack Mistral)
-Transcription (STT) : Voxtral-realtime-latest (Mistral AI).
+| Distortion | Description |
+|---|---|
+| **Statistical** | Manipulation or misquoting of official figures (GDP, unemployment, budgets) |
+| **Rhetorical (Evasion)** | "Langue de bois" — the speaker dodges the journalist's question |
+| **Coherence** | Contradictions with the speaker's own past public statements |
+| **Missing Context** | Claims that are technically accurate but misleading without surrounding facts |
 
-Raisonnement & Analyse : Mistral-Small-latest (Router) & Mistral-Large-latest (Expert).
+## Architecture Overview
 
-Monitoring : Weights & Biases (Weave) pour le tracking des prompts.
+```
+┌─────────────────────────────────────────────────────────────────────┐
+│                        Live Audio Stream                            │
+└───────────────────────────────┬─────────────────────────────────────┘
+                                │
+                                ▼
+┌─────────────────────────────────────────────────────────────────────┐
+│  ingestion/  — realtime_transcript.py                               │
+│  Mic → Voxtral Realtime STT → JSONL stream (1 line per sentence)   │
+└───────────────────────────────┬─────────────────────────────────────┘
+                                │ stdout (JSONL)
+                                ▼
+┌─────────────────────────────────────────────────────────────────────┐
+│  workflows/  — Temporal Orchestration                               │
+│                                                                     │
+│  debate_jsonl_to_temporal.py  reads JSONL, starts 1 workflow/line   │
+│                                                                     │
+│  ┌─────────────────────────────────────────────────────────────┐    │
+│  │  Temporal Workflow  (debate_workflow.py)                     │    │
+│  │                                                             │    │
+│  │  1. analyze_debate_line     ─── Mistral AI Agent Pipeline   │    │
+  │     (retry ×3, backoff 2 s – 20 s)                         │    │
+  │  2. check_self_correction   ─── Heuristic + LLM fallback   │    │
+  │     (retry ×2; failure → no-correction default)            │    │
+  │  3. wait for video delay    ─── Sync with live broadcast    │    │
+  │  4. post_fact_check_result  ─── HTTP POST to app/           │    │
+  │     (retry ×5, backoff 2 s – 30 s)                         │    │
+│  └─────────────────────────────────────────────────────────────┘    │
+│                                                                     │
+│  Mistral AI Agent Pipeline:                                         │
+│  ┌────────┐   ┌────────┐ ┌──────────┐ ┌──────────┐ ┌──────────┐   │
+│  │ Routeur ├──▶│ Stats  │ │Rhétorique│ │Cohérence │ │ Contexte │   │
+│  │ (route) │   │(search)│ │(analyze) │ │ (search) │ │ (search) │   │
+│  └────────┘   └───┬────┘ └────┬─────┘ └────┬─────┘ └────┬─────┘   │
+│                   └───────────┴────────────┴────────────┘          │
+│                               │                                     │
+│                        ┌──────┴──────┐                              │
+│                        │   Éditeur   │  ← synthesizes TV verdict    │
+│                        └─────────────┘                              │
+└───────────────────────────────┬─────────────────────────────────────┘
+                                │ HTTP POST  /api/stream/fact-check
+                                ▼
+┌─────────────────────────────────────────────────────────────────────┐
+│  app/  — Laravel 12 + Inertia.js + Vue 3                           │
+│                                                                     │
+│  Receives verdict → broadcasts via Laravel Reverb (WebSocket)       │
+│  → Vue overlay component renders on OBS browser source              │
+│  → OBS scene switch (obs-websocket-php) to show/hide the overlay    │
+└───────────────────────────────┬─────────────────────────────────────┘
+                                │
+                                ▼
+┌─────────────────────────────────────────────────────────────────────┐
+│  facts/  — Laravel 12 (persistence API)                             │
+│  Stores verified facts for later consultation (POST /api/facts)     │
+└─────────────────────────────────────────────────────────────────────┘
+```
 
-Données Externes : API Google Search (Filtrée sur sources institutionnelles).
+## Tech Stack
 
-Interface : Dashboard temps réel (React ou Streamlit).
+| Layer | Technology |
+|---|---|
+| Speech-to-Text | **Voxtral Realtime** (Mistral AI) |
+| AI Agents (routing, analysis, synthesis) | **Mistral Conversations API** with `web_search` tool |
+| Agent models | `mistral-medium-latest` (configurable) |
+| Workflow orchestration | **Temporal** (durable execution, retries, timeouts) |
+| Media server | **MediaMTX** — SRT/RTMP/RTSP ingest |
+| Backend (overlay + OBS) | **Laravel 12**, Inertia.js v2, Laravel Reverb |
+| Frontend (overlay) | **Vue 3** + Tailwind CSS v4 |
+| OBS integration | `obs-websocket-php` — scene switching via WebSocket |
+| Persistence | **Laravel 12** (facts service) |
+| Infrastructure | **Docker Compose** — PostgreSQL, Elasticsearch, Temporal |
 
-3. Connexion des Tâches (Le Protocole d'Échange)
-Pour que vous ne vous bloquiez pas mutuellement, vous allez fonctionner avec un système de Producteur/Consommateur basé sur un fichier JSON partagé ou une file d'attente (Queue).
+## Repository Structure
 
-🛠️ Rôle 1 : Numéricien 1 (Le Pipe Audio)
-Mission : Transformer le son en texte brut.
+```
+.
+├── ingestion/                   # Audio capture → real-time transcription
+│   ├── realtime_transcript.py       # Mic → Voxtral STT → JSONL
+│   └── requirements.txt
+│
+├── workflows/                   # Temporal workflows + Mistral AI agents
+│   ├── debate_config.py             # Shared constants (task queue, timeouts)
+│   ├── pyproject.toml               # Python deps (uv)
+│   ├── workers/
+│   │   ├── debate_worker.py                 # Temporal worker
+│   │   └── debate_jsonl_to_temporal.py      # JSONL → Temporal starter
+│   ├── workflows/
+│   │   └── debate_workflow.py               # Workflow orchestration
+│   ├── activities/
+│   │   ├── debate_activities.py         # Fact-check business logic
+│   │   ├── mistral_runtime.py           # Agent pool lifecycle + Conversations API
+│   │   ├── agent_specs.py               # Agent definitions & tools
+│   │   ├── prompts.py                   # Prompt templates + PoliticalProfile
+│   │   └── schemas.py                   # Pydantic models for agent JSON outputs
+│   └── utils/                           # Env loading, retry, text helpers
+│
+├── app/                         # Laravel — live overlay + OBS integration
+│   ├── routes/
+│   │   ├── api.php                  # POST /api/stream/fact-check
+│   │   └── web.php                  # GET /overlays/fact-check (Inertia)
+│   ├── app/
+│   │   ├── Http/Controllers/        # StreamFactCheckController
+│   │   ├── Events/                  # FactCheckContentUpdated (Reverb broadcast)
+│   │   ├── Jobs/                    # VerifyFactCheckSceneTimestampJob
+│   │   └── Services/Obs/            # OBS WebSocket integration
+│   └── resources/js/
+│       └── pages/overlays/fact-check/   # Vue overlay component
+│
+├── facts/                       # Laravel — fact persistence API
+│   └── routes/api.php               # POST /api/facts
+│
+├── docker-compose.yml           # Full infrastructure stack
+├── mediamtx.yml                 # MediaMTX config (SRT ingest)
+├── dynamicconfig/               # Temporal dynamic configuration
+├── scripts/                     # DB setup, namespace creation, mocks
+└── cle.env.example              # Environment variable template
+```
 
-Entrée : Flux audio YouTube.
+## Prerequisites
 
-Action : Envoie des chunks audio à Voxtral.
+- **Docker** & **Docker Compose**
+- **Python ≥ 3.14** with [uv](https://docs.astral.sh/uv/)
+- **PHP ≥ 8.2** with Composer
+- **Node.js** with pnpm
+- A **Mistral AI API key**
 
-Connexion : Il écrit le résultat dans un objet Python (ou un fichier stream_text.json) sous cette forme :
+## Quick Start
 
-JSON
-{ "timestamp": "12:05", "raw_text": "Le chômage a baissé de 2%." }
+### 1. Clone & configure environment
 
-🧠 Rôle 2 : Numéricienne 2 (Le Cerveau - Toi)
-Mission : Transformer le texte brut en analyse structurée.
+```bash
+git clone https://github.com/Barbapapazes/hackathon-paris.git
+cd hackathon-paris
 
-Entrée : Lit le raw_text de Numéricien 1.
+# Copy and fill in your API keys
+cp cle.env.example .env
+cp workflows/.env.example workflows/.env
+# Edit both files — at minimum set MISTRAL_API_KEY
+```
 
-Action :
+### 2. Start infrastructure (Temporal + PostgreSQL + Elasticsearch + MediaMTX)
 
-Route via Mistral Small.
+```bash
+docker compose up -d
+```
 
-Si Statistique : Lance la recherche Google + Analyse Mistral Large.
+This starts:
 
-Si Esquive/Contexte : Analyse directe Mistral Large.
+| Service | Port | Description |
+|---|---|---|
+| Temporal Server | `7233` | Workflow engine |
+| Temporal UI | `8080` | Web dashboard |
+| PostgreSQL | `5432` | Temporal persistence |
+| Elasticsearch | `9200` | Temporal visibility |
+| MediaMTX | `8890/udp` (SRT), `1935` (RTMP) | Media ingest |
 
-Connexion : Elle produit le JSON final (Le Contrat) et l'envoie au Dev Web.
+### 3. Start the Laravel app (overlay + OBS)
 
-💻 Rôle 3 : Dev Web (L'Interface)
-Mission : Rendre l'analyse lisible et immédiate.
+```bash
+cd app
+composer install
+cp .env.example .env
+php artisan key:generate
+php artisan migrate
+pnpm install && pnpm run build
 
-Entrée : Lit le JSON final produit par Numéricienne 2.
+# In separate terminals:
+php artisan serve            # http://localhost:8000
+php artisan reverb:start     # WebSocket server
+php artisan queue:listen     # Background jobs
+```
 
-Action : Met à jour la Timeline en injectant la nouvelle carte avec le bon code couleur (Vert/Orange/Rouge).
+The fact-check overlay is at `http://localhost:8000/overlays/fact-check` — point an OBS Browser Source to this URL.
 
-Connexion : Il travaille en autonomie avec un fichier mock_data.json jusqu'à ce que les numériciens branchent le flux réel.
+### 4. Start the Temporal worker
 
-4. Le Contrat de Données (L'Interface Commune)
-C'est le point de rencontre obligatoire de vos trois codes.
+```bash
+cd workflows
+uv sync
+uv run python workers/debate_worker.py
+```
 
-JSON
+### 5. Run the live pipeline
+
+```bash
+# Terminal 1 — Transcription → Temporal
+cd ingestion
+python3 -m venv .venv && source .venv/bin/activate
+pip install -r requirements.txt
+
+python realtime_transcript.py \
+  --input-device-index 0 \
+  --personne "Candidate Name" \
+  --source-video "TF1 20h" \
+| tee debate_stream.jsonl \
+| python ../workflows/workers/debate_jsonl_to_temporal.py --video-delay-seconds 30
+```
+
+Or submit an existing JSONL file:
+
+```bash
+cd workflows
+uv run python workers/debate_jsonl_to_temporal.py \
+  --input-jsonl ../debate_stream.jsonl \
+  --video-delay-seconds 30
+```
+
+## How It Works
+
+### 1. Transcription
+
+`realtime_transcript.py` captures microphone audio via PyAudio, streams it to **Voxtral Realtime** (Mistral's speech-to-text), and emits one JSONL line per detected sentence:
+
+```json
 {
-  "id": "uuid",
-  "timestamp": "HH:MM:SS",
-  "category": "STAT | ESQUIVE | CONTEXT | CONTRADICTION",
-  "raw_input": "La phrase du politique",
-  "analysis": {
-    "verdict": "green | orange | red | blue",
-    "title": "Titre court",
-    "explanation": "Explication pédagogique de Mistral Large",
-    "source_url": "Lien vers la preuve",
-    "confidence_score": 0.95
+  "personne": "Valérie Pécresse",
+  "question_posee": "",
+  "affirmation": "Last 3 complete sentences merged",
+  "affirmation_courante": "Latest single sentence",
+  "metadata": {
+    "source_video": "TF1 20h",
+    "timestamp_elapsed": "12:45",
+    "timestamp": "2026-02-28T17:12:34.123Z"
   }
 }
-5. Timeline du Sprint
-Samedi 13h-15h : Stabilisation des pipelines individuels (STT pour N1, Prompts pour N2, UI pour Web).
+```
 
-Samedi 15h-19h : Développement des modules d'analyse (Stats et Esquive).
+### 2. Temporal Workflow
 
-Samedi 19h-23h : Premier "Frankenstein" (Connexion des 3 rôles).
+`debate_jsonl_to_temporal.py` ingests the JSONL stream and starts one **Temporal workflow** per sentence, passing:
+- The current sentence (`current_json`)
+- A sliding window of the last ~60 seconds of conversation (`last_minute_json`)
+- The next sentence when available (`next_json`) for self-correction detection
 
-Dimanche 08h-11h : Débogage final et Code Freeze.
+The workflow (`debate_workflow.py`) orchestrates three activities in sequence:
 
-Dimanche 11h-15h : Enregistrement démo et Pitch.
+1. **`analyze_debate_line`** — runs the full Mistral AI agent pipeline
+2. **`check_next_phrase_self_correction`** — detects if the speaker corrects themselves
+3. **`post_fact_check_result`** — POSTs the verdict to the Laravel app (after video delay)
 
-Conseil pour la connexion :
-Utilisez un dossier partagé sur un GitHub commun.
+### 3. Mistral AI Agent Pipeline
 
-Numéricien 1 travaille dans ingestion/.
+Six specialized agents are created on-the-fly via the Mistral Agents API:
 
-Numéricienne 2 travaille dans analysis/.
+| Agent | Role | Tools |
+|---|---|---|
+| **Routeur** | Classifies the claim, selects which specialists to run | — |
+| **Statistique** | Verifies numeric claims against official sources | `web_search` |
+| **Rhétorique** | Detects evasion of the journalist's question | — |
+| **Cohérence** | Checks contradiction with past public statements | `web_search` |
+| **Contexte** | Provides factual background context | `web_search` |
+| **Éditeur** | Synthesizes all reports into a TV-ready verdict (2 sentences) | — |
 
-Dev Web travaille dans frontend/.
+All agents are executed via the **Conversations API** (`client.beta.conversations.start`), which handles tool execution server-side. Agents are created before each analysis and deleted afterward (guaranteed via `try/finally`).
 
-# Structure 
+### 4. Self-Correction Detection
 
-Blocs concernés : Virtual mic ➔ (Nouveau sous-système de buffer)
+Before posting a verdict, the system checks if the speaker's next sentence is a self-correction:
 
-Le rôle : Capturer le son sans interruption et préparer les blocs superposés.
+1. **Heuristic check** — keyword markers (e.g. "je me corrige", "en fait", "pardon") + number replacement patterns
+2. **LLM fallback** — if the heuristic is inconclusive
 
-Entrée : Flux audio brut (ex: PCM, 16kHz) en continu depuis la vidéo/le micro.
+If a self-correction is detected, the verdict is suppressed.
 
-Sortie : Un fichier temporaire ou un buffer en mémoire contenant exactement les 20 dernières secondes d'audio, généré strictement toutes les 10 secondes.
+### 5. Live Overlay
 
-Comment l'implémenter : * Utilisez un script Python asynchrone avec une structure de données collections.deque (taille fixe correspondant à 20s d'échantillons).
+The Laravel app receives the verdict via `POST /api/stream/fact-check`, broadcasts it through **Laravel Reverb** (WebSocket), and the Vue overlay component renders it in real time. The app also controls OBS scene switching via `obs-websocket-php` to show/hide the fact-check overlay on the live broadcast.
 
-L'audio entre en continu d'un côté. Toutes les 10 secondes, une tâche asyncio "photographie" l'état actuel du deque et l'envoie au bloc suivant.
+### 6. Verdict Format
 
-2. Transcription Vocale (STT)
-Blocs concernés : STT ➔ Voxtral Realtime
-
-Le rôle : Transformer le bloc audio de 20s en texte.
-
-Entrée : Le chunk audio de 20 secondes.
-
-Sortie : Une chaîne de caractères (String) brute. Attention : à cause de la fenêtre glissante, la première moitié de ce texte sera quasiment identique à la seconde moitié du texte généré 10 secondes plus tôt.
-
-Outils recommandés : Voxtral (si disponible via Mistral), ou des API ultra-rapides comme Groq (Whisper) ou Deepgram pour minimiser la latence.
-
-3. Triage, Extraction et "Semantic Cache" (Le Filtre Anti-Doublon)
-Bloc concerné : Minitral (classification)
-
-Le rôle : Extraire les affirmations pertinentes et, surtout, bloquer les doublons créés par le chevauchement audio pour ne pas spammer OBS.
-
-Entrée : La chaîne de caractères brute de 20s.
-
-Sortie : Un objet JSON strict contenant uniquement les nouvelles affirmations vérifiables.
-
-JSON
+```json
 {
-  "nouvelles_affirmations": [
-    {"id": "aff_12", "texte": "Le chômage a baissé de 10% depuis mon élection."}
+  "verdict_global": "Faux | Vrai | Exagéré | Trompeur | À nuancer | Contradictoire",
+  "explications": {
+    "statistique": { "texte": "...", "source": "INSEE", "url": "https://..." },
+    "contexte":    { "texte": "...", "source": "Le Monde", "url": "https://..." },
+    "rhetorique":  "Évasion détectée: ...",
+    "coherence":   { "texte": "...", "source": "France Info", "url": "https://..." }
+  },
+  "sources": [
+    { "organization": "INSEE", "url": "https://..." }
   ]
 }
-Outils recommandés : Modèle rapide (ex: ministral-8b) en mode JSON.
+```
 
-Comment l'implémenter :
+Only the relevant keys appear in `explications` depending on which agents were triggered by the router.
 
-Prompt : Demandez au modèle d'extraire sous forme de liste les affirmations factuelles.
 
-Le Cache (Code Python) : Stockez en mémoire les affirmations des 60 dernières secondes. Quand Minitral sort une liste d'affirmations pour le bloc actuel, comparez-les rapidement au cache (avec une fonction de similarité textuelle comme TF-IDF ou un calcul de distance de Levenshtein très basique). Si l'affirmation a déjà été analysée il y a 10 secondes, elle est supprimée de la liste. Seules les nouvelles affirmations passent à l'étape suivante.
+## Country Configuration
 
-4. Les 3 Agents d'Analyse (Exécution Parallèle)
-Blocs concernés : Statistique, Distorsion rhétorique, Cohérence + Tools (web search, mcp, rag)
+All prompts are parameterized by a **`PoliticalProfile`** dataclass (defined in `workflows/activities/prompts.py`). The default profile is `FRANCE_PROFILE` (French political TV debate).
 
-Le rôle : Vérifier l'affirmation sous trois angles différents simultanément.
+To adapt the pipeline to another country:
 
-Entrée : L'objet JSON de la nouvelle affirmation extraite.
+```python
+from activities.prompts import set_political_profile, PoliticalProfile
 
-Sortie : 3 rapports distincts au format JSON.
+US_PROFILE = PoliticalProfile(
+    country="United States",
+    language="English",
+    event_type="presidential debate",
+    institutional_sources=["BLS", "CBO", "Census Bureau", "Federal Reserve"],
+    trusted_media=["Associated Press", "Reuters", "NPR"],
+    key_institutions=["White House", "Congress", "Supreme Court"],
+    political_context_hint="Live US presidential debate. Prefer .gov sources.",
+    correction_markers=["let me correct", "I misspoke", "I meant", "actually"],
+)
 
-JSON
-{
-  "agent": "distorsion_rhetorique",
-  "verdict": "trompeur",
-  "type": "homme_de_paille",
-  "explication": "Le locuteur invente un argument que son adversaire n'a jamais prononcé pour le discréditer."
-}
-Outils recommandés : * Agent 1 (Stats) : mistral-small + Tool Web Search (ex: Tavily).
+set_political_profile(US_PROFILE)
+```
 
-Agent 2 (Rhétorique) : mistral-large (nécessite beaucoup de finesse de raisonnement, pas d'outil externe nécessaire).
+| Field | Type | Description |
+|---|---|---|
+| `country` | `str` | Full country name |
+| `language` | `str` | Primary language for agent output |
+| `event_type` | `str` | Short label (e.g. "débat politique télévisé") |
+| `institutional_sources` | `list[str]` | Preferred official data sources |
+| `trusted_media` | `list[str]` | Reliable media outlets |
+| `key_institutions` | `list[str]` | Government bodies the agents should know |
+| `political_context_hint` | `str` | Free-form paragraph grounding the agents |
+| `correction_markers` | `list[str]` | Language-specific self-correction phrases |
 
-Agent 3 (Cohérence) : mistral-small + MCP connecté à une base vectorielle (RAG) contenant les archives du candidat.
+## Environment Variables
 
-Comment l'implémenter : Utilisez impérativement asyncio.gather() en Python. Les trois appels d'API vers Mistral doivent partir à la milliseconde près en même temps.
+### `workflows/.env`
 
-5. Agrégation et Action TV (Tool Calling OBS)
-Blocs concernés : Mistral 3 (agrégation) ➔ Tools (changement de scène) ➔ OBS
+| Variable | Required | Default | Description |
+|---|---|---|---|
+| `MISTRAL_API_KEY` | **yes** | — | Mistral AI API key |
+| `MISTRAL_AGENT_MODEL` | no | `mistral-medium-latest` | Model for all agents |
+| `MISTRAL_AGENT_NAME_PREFIX` | no | `factcheck-live` | Agent name prefix on the platform |
+| `FACT_CHECK_POST_URL` | no | `http://localhost:8000/api/stream/fact-check` | Endpoint to POST verdicts |
+| `VIDEO_STREAM_DELAY_SECONDS` | no | `30` | Delay before posting (sync with live video) |
+| `FACT_CHECK_ANALYSIS_TIMEOUT_SECONDS` | no | `30` | Activity timeout for analysis |
+| `MISTRAL_RATE_LIMIT_MAX_RETRIES` | no | `4` | Max retries on rate-limit errors |
+| `MISTRAL_RATE_LIMIT_BACKOFF_BASE_SECONDS` | no | `0.7` | Exponential backoff base |
+| `MISTRAL_RATE_LIMIT_BACKOFF_MAX_SECONDS` | no | `6.0` | Backoff cap |
 
-Le rôle : Prendre une décision finale et l'afficher à l'écran en direct.
+### `app/.env`
 
-Entrée : Une liste regroupant les 3 JSON générés par les agents parallèles.
+Standard Laravel environment plus:
 
-Sortie : L'exécution d'un appel de fonction (Tool Calling) qui déclenche une requête WebSocket.
+| Variable | Description |
+|---|---|
+| `OBS_HOST` | OBS WebSocket host (default `127.0.0.1`) |
+| `OBS_PORT` | OBS WebSocket port (default `4455`) |
+| `OBS_PASSWORD` | OBS WebSocket password |
+| `OBS_SCENE_FACT_CHECK` | OBS scene name for fact-check overlay |
+| `OBS_SCENE_PROGRAM_DEFAULT` | Default OBS program scene |
+| `OBS_COOLDOWN_SECONDS` | Min seconds between scene switches (default `5`) |
+| `REVERB_*` | Laravel Reverb WebSocket configuration |
 
-Outils recommandés : mistral-large-latest avec Function Calling, et la librairie Python obs-websocket-py.
+## Docker Compose Services
 
-Comment l'implémenter :
+| Service | Image | Ports | Purpose |
+|---|---|---|---|
+| `mediamtx` | `bluenviron/mediamtx` | `8890/udp`, `1935`, `8554`, `8888` | SRT/RTMP/RTSP media ingest |
+| `postgresql` | `postgres` | `5432` | Temporal persistence |
+| `elasticsearch` | `elasticsearch` | `9200` | Temporal visibility store |
+| `temporal` | `temporalio/server` | `7233` | Workflow engine |
+| `temporal-ui` | `temporalio/ui` | `8080` | Temporal web dashboard |
+| `temporal-admin-tools` | `temporalio/admin-tools` | — | DB schema setup |
+| `app-web` | Custom (Laravel) | `8000` | Main app server |
+| `app-queue` | Custom (Laravel) | — | Queue worker |
+| `app-reverb` | Custom (Laravel) | `8081` | WebSocket server (Reverb) |
 
-Mistral reçoit un prompt système lui demandant de faire la synthèse des 3 agents. S'il y a un consensus sur le fait que la phrase est fausse/trompeuse, le modèle déclenche l'outil fourni : update_obs_alert(verdict_type, short_summary, source).
+## Development
 
-Votre script Python intercepte cet appel de fonction et envoie une commande WebSocket à OBS pour rendre visible un groupe d'éléments (un calque texte avec le résumé + un fond de couleur) pendant 5 à 10 secondes, avant de le masquer à nouveau.
+### Running tests
 
-## Intégration en cours (transcript + Temporal)
+```bash
+# Laravel app tests
+cd app && php artisan test
 
-- Transcription realtime: `ingestion/realtime_transcript.py`
-- Workflow no-op 30s par ligne JSON: `workflows/debate_workflow.py`
-- Worker Temporal associé: `workflows/debate_worker.py`
-- Envoi JSONL vers Temporal: `workflows/debate_jsonl_to_temporal.py`
+# Facts service tests
+cd facts && php artisan test
+```
 
-Voir `ingestion/README.md` et `workflows/README.md` pour le runbook.
+### Quick smoke test (no Temporal needed)
+
+```bash
+cd workflows/activities
+uv run debate_activities.py
+```
+
+Creates fake data, runs the full agent pipeline, prints JSON results.
+
+### Mock HTTP receiver
+
+If the Laravel app isn't running:
+
+```bash
+python scripts/mock_fact_check_receiver.py --port 8000
+```
+
+## License
+
+Private — Hackathon project.

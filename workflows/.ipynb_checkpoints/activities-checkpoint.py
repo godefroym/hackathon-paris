@@ -191,7 +191,7 @@ async def agent_editeur(contexte_precedent, affirmation_actuelle, rapports_agent
     print("📝 [Rédacteur en Chef] Régulation par rapport au contexte global...")
     
     if not rapports_agents:
-        return {"afficher_bandeau": False, "raison": "Aucun fact-check nécessaire."}
+        return {"raison": "Aucun fact-check nécessaire."}
 
     prompt = f"""Tu es le Rédacteur en Chef d'une émission politique en direct.
     
@@ -205,14 +205,14 @@ async def agent_editeur(contexte_precedent, affirmation_actuelle, rapports_agent
     {json.dumps(rapports_agents, ensure_ascii=False)}
 
     TA MISSION :
-    - Filtre de redondance : Si le fait a déjà été expliqué dans l'historique de la discussion, ou si le fact-check est inutile, mets "afficher_bandeau": false.
+    - Filtre de redondance : Si le fait a déjà été expliqué dans l'historique de la discussion, ou si le fact-check est inutile, fournis une raison courte dans "raison".
     - Verdict Nuancé : Détermine la vérité globale de l'affirmation à l'instant T (ex: Vrai, Faux, Exagéré, Trompeur, À nuancer, Contradictoire).
     - Synthèse TV : Les agents ont fourni de longues analyses. Compresse leur travail en EXACTEMENT DEUX PHRASES concises et percutantes pour l'affichage final, en ajoutant la nuance nécessaire par rapport au contexte.
     
     FORMAT JSON STRICT ATTENDU :
     {{
-      "afficher_bandeau": true,
       "verdict_global": "Trompeur", // ou Vrai, Faux, À nuancer...
+            "raison": "optionnel",
       "explications": {{
          "statistique": {{
             "texte": "Les 2 phrases de synthèse max.",
@@ -276,6 +276,5 @@ async def analyze_debate_line(current_json: dict, last_minute_json: dict) -> dic
     except Exception as e:
         print(f"❌ Erreur lors de l'analyse : {e}")
         return {
-            "afficher_bandeau": False,
             "erreur": str(e)
         }
