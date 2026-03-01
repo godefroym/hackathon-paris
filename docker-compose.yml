@@ -282,9 +282,9 @@ services:
     ports:
       - "8083:8080"
 
-  workflows-worker:
+  workflows-debate-worker:
     <<: *workflows-common
-    container_name: workflows-worker
+    container_name: workflows-debate-worker
     depends_on:
       temporal-create-namespace:
         condition: service_completed_successfully
@@ -292,17 +292,49 @@ services:
         condition: service_healthy
     environment:
       FACT_CHECK_POST_URL: ${FACT_CHECK_POST_URL:-http://app-web:8000/api/stream/fact-check}
-    command: [ "python", "workflows/debate_worker.py", "--address", "temporal:7233" ]
+      VERISTRAL_POST_URL: ${VERISTRAL_POST_URL:-http://veristral-web:8000/api/facts}
+    command: [ "python", "workflows/workers/debate_worker.py", "--address", "temporal:7233" ]
+
+  workflows-transcript-worker:
+    <<: *workflows-common
+    container_name: workflows-transcript-worker
+    depends_on:
+      temporal-create-namespace:
+        condition: service_completed_successfully
+      app-web:
+        condition: service_healthy
+    environment:
+      FACT_CHECK_POST_URL: ${FACT_CHECK_POST_URL:-http://app-web:8000/api/stream/fact-check}
+      VERISTRAL_POST_URL: ${VERISTRAL_POST_URL:-http://veristral-web:8000/api/facts}
+    command: [ "python", "workflows/workers/transcript_worker.py", "--address", "temporal:7233" ]
 
   workflows-launcher:
     <<: *workflows-common
     depends_on:
-      temporal:
-        condition: service_healthy
+      temporal-create-namespace:
+        condition: service_completed_successfully
+      workflows-debate-worker:
+        condition: service_started
+      workflows-transcript-worker:
+        condition: service_started
+    environment:
+      PERSONNE: ${PERSONNE:-}
+      SOURCE_VIDEO: ${SOURCE_VIDEO:-}
+      QUESTION_POSEE: ${QUESTION_POSEE:-}
+      INPUT_DEVICE_INDEX: ${INPUT_DEVICE_INDEX:-}
+    devices:
+      - /dev/snd:/dev/snd
     restart: "no"
-    stdin_open: true
-    tty: false
-    command: [ "python", "workflows/debate_jsonl_to_temporal.py", "--address", "temporal:7233", "--input-jsonl", "-" ]
+    command:
+      - sh
+      - -c
+      - |
+        exec python workflows/pipeline.py \
+          --address temporal:7233 \
+          ${PERSONNE:+--personne "$PERSONNE"} \
+          ${SOURCE_VIDEO:+--source-video "$SOURCE_VIDEO"} \
+          ${QUESTION_POSEE:+--question-posee "$QUESTION_POSEE"} \
+          ${INPUT_DEVICE_INDEX:+--input-device-index "$INPUT_DEVICE_INDEX"}
 
 networks:
   app-network:
