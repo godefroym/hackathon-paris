@@ -19,6 +19,138 @@ SELF_CORRECTION_ACTIVITY_NAME = "check_next_phrase_self_correction"
 POST_ACTIVITY_NAME = "post_fact_check_result"
 
 
+def _claim_text_from_current_json(current_json: dict[str, Any]) -> str:
+    current = current_json.get("affirmation_courante")
+    if isinstance(current, str) and current.strip():
+        return current.strip()
+    fallback = current_json.get("affirmation")
+    if isinstance(fallback, str) and fallback.strip():
+        return fallback.strip()
+    return ""
+
+
+def _is_http_url(value: str) -> bool:
+    return value.startswith("http://") or value.startswith("https://")
+
+
+def _collect_sources(analysis_result: dict[str, Any]) -> list[dict[str, str]]:
+    collected: list[dict[str, str]] = []
+    seen_urls: set[str] = set()
+
+    sources = analysis_result.get("sources")
+    if isinstance(sources, list):
+        for item in sources:
+            if not isinstance(item, dict):
+                continue
+            organization = item.get("organization")
+            url = item.get("url")
+            if not isinstance(organization, str) or not isinstance(url, str):
+                continue
+            org = organization.strip()
+            href = url.strip()
+            if not org or not href or not _is_http_url(href):
+                continue
+            if href in seen_urls:
+                continue
+            seen_urls.add(href)
+            collected.append({"organization": org, "url": href})
+
+    explications = analysis_result.get("explications")
+    if isinstance(explications, dict):
+        for value in explications.values():
+            if not isinstance(value, dict):
+                continue
+            source = value.get("source")
+            url = value.get("url")
+            if not isinstance(source, str) or not isinstance(url, str):
+                continue
+            org = source.strip()
+            href = url.strip()
+            if not org or not href or not _is_http_url(href):
+                continue
+            if href in seen_urls:
+                continue
+            seen_urls.add(href)
+            collected.append({"organization": org, "url": href})
+
+    return collected
+
+
+def _summary_from_analysis_result(analysis_result: dict[str, Any]) -> str:
+    summary_parts: list[str] = []
+    explications = analysis_result.get("explications")
+
+    if isinstance(explications, dict):
+        preferred_keys = ("statistique", "contexte", "coherence", "rhetorique")
+        for key in preferred_keys:
+            value = explications.get(key)
+            if isinstance(value, dict):
+                text = value.get("texte")
+                if isinstance(text, str) and text.strip():
+                    summary_parts.append(text.strip())
+            elif isinstance(value, str) and value.strip():
+                summary_parts.append(value.strip())
+
+        if not summary_parts:
+            for value in explications.values():
+                if isinstance(value, dict):
+                    text = value.get("texte")
+                    if isinstance(text, str) and text.strip():
+                        summary_parts.append(text.strip())
+                elif isinstance(value, str) and value.strip():
+                    summary_parts.append(value.strip())
+
+    if summary_parts:
+        return " ".join(summary_parts)
+
+    reason = analysis_result.get("raison")
+    if isinstance(reason, str) and reason.strip():
+        return reason.strip()
+    error = analysis_result.get("erreur")
+    if isinstance(error, str) and error.strip():
+        return error.strip()
+    return ""
+
+
+def _build_fact_check_api_payload(
+    current_json: dict[str, Any], analysis_result: Any
+) -> dict[str, Any] | None:
+    if not isinstance(analysis_result, dict):
+        return None
+
+    if not bool(analysis_result.get("afficher_bandeau", False)):
+        return None
+
+    claim_text = _claim_text_from_current_json(current_json)
+    if not claim_text:
+        return None
+
+    summary = _summary_from_analysis_result(analysis_result)
+    if not summary:
+        return None
+
+    sources = _collect_sources(analysis_result)
+    if not sources:
+        return None
+
+    verdict = analysis_result.get("verdict_global")
+    if not isinstance(verdict, str) or not verdict.strip():
+        fallback_verdict = analysis_result.get("overall_verdict")
+        if isinstance(fallback_verdict, str) and fallback_verdict.strip():
+            verdict = fallback_verdict.strip()
+        else:
+            verdict = "inconnu"
+
+    return {
+        "claim": {"text": claim_text[:2000]},
+        "analysis": {
+            "summary": summary[:3000],
+            "sources": sources[:8],
+        },
+        "overall_verdict": str(verdict).strip()[:100],
+    }
+
+
 @workflow.defn(name=WORKFLOW_TYPE)
 class DebateJsonNoopWorkflow:
     @workflow.run
@@ -66,6 +198,7 @@ class DebateJsonNoopWorkflow:
             )
 
         if skip_post_due_to_correction:
+            post_payload = None
             reason = ""
             if isinstance(correction_check, dict):
                 reason = str(correction_check.get("reason", "")).strip()
@@ -85,11 +218,19 @@ class DebateJsonNoopWorkflow:
                 "reason": "next_phrase_self_correction",
             }
         else:
-            post_result = await workflow.execute_activity(
-                POST_ACTIVITY_NAME,
-                args=[analysis_result],
-                start_to_close_timeout=timedelta(seconds=DEFAULT_POST_TIMEOUT_SECONDS),
-            )
+            post_payload = _build_fact_check_api_payload(current_json, analysis_result)
+            if post_payload is None:
+                post_result = {
+                    "posted": False,
+                    "skipped": True,
+                    "reason": "analysis_not_postable",
+                }
+            else:
+                post_result = await workflow.execute_activity(
+                    POST_ACTIVITY_NAME,
+                    args=[post_payload],
+                    start_to_close_timeout=timedelta(seconds=DEFAULT_POST_TIMEOUT_SECONDS),
+                )
 
         workflow.logger.info(
             "Workflow completed",
@@ -114,5 +255,6 @@ class DebateJsonNoopWorkflow:
             "correction_check": correction_check,
             "skip_post_due_to_correction": skip_post_due_to_correction,
             "analysis_result": analysis_result,
+            "post_payload_preview": post_payload,
             "post_result": post_result,
         }

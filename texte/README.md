@@ -87,6 +87,8 @@ python texte/realtime_transcript_elevenlabs.py \
 ```bash
 cd /Users/godefroy.meynard/Documents/test_datagouv_mcp/hackaton_audio/hackathon-paris
 export VIDEO_DELAY_SECONDS=30
+export MAX_WAIT_NEXT_PHRASE_SECONDS=0.5
+export ANALYSIS_TIMEOUT_SECONDS=20
 # optional
 export TEE_JSONL_PATH=debate_stream_elevenlabs.jsonl
 
@@ -136,6 +138,8 @@ Main knobs:
 ```bash
 cd /Users/godefroy.meynard/Documents/test_datagouv_mcp/hackaton_audio/hackathon-paris
 export VIDEO_DELAY_SECONDS=30
+export MAX_WAIT_NEXT_PHRASE_SECONDS=0.5
+export ANALYSIS_TIMEOUT_SECONDS=20
 # optional
 export TEE_JSONL_PATH=debate_stream_fusion.jsonl
 

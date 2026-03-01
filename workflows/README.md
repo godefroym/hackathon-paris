@@ -18,13 +18,18 @@ For each transcript line, the launcher sends:
 - `last_minute_json`: aggregate built from payload timestamps, containing all
   phrases from the last 60 seconds.
 
-Per-line post delay is computed as:
-- `computed_post_delay = VIDEO_STREAM_DELAY_SECONDS - (ts_current - ts_previous)`
+Per-line post delay is computed from an absolute target timestamp:
+- `estimated_phrase_start = ts_previous` (fallback: `ts_current` for first line)
+- `target_post_timestamp = estimated_phrase_start + VIDEO_STREAM_DELAY_SECONDS`
+- `computed_post_delay = target_post_timestamp - now_at_workflow_submission`
 - clamped to `>= 0`
-- first line uses full `VIDEO_STREAM_DELAY_SECONDS`
 
 POST payload sent by the workflow:
-- `workflow_result` only (result returned by `analyze_debate_line`)
+- API-ready payload:
+  - `claim.text`
+  - `analysis.summary`
+  - `analysis.sources[]`
+  - `overall_verdict`
 
 Main timing variables (in `cle.env` or CLI):
 - `VIDEO_STREAM_DELAY_SECONDS` (default: 30)

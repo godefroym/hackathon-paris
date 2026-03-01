@@ -4,6 +4,8 @@ set -euo pipefail
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 VENV_PATH="$ROOT_DIR/ingestion/.venv/bin/activate"
 VIDEO_DELAY_SECONDS="${VIDEO_DELAY_SECONDS:-30}"
+MAX_WAIT_NEXT_PHRASE_SECONDS="${MAX_WAIT_NEXT_PHRASE_SECONDS:-1.0}"
+ANALYSIS_TIMEOUT_SECONDS="${ANALYSIS_TIMEOUT_SECONDS:-30}"
 TEE_JSONL_PATH="${TEE_JSONL_PATH:-}"
 
 cd "$ROOT_DIR"
@@ -23,12 +25,16 @@ if [[ -n "$TEE_JSONL_PATH" ]]; then
         python workflows/debate_jsonl_to_temporal.py \
           --address temporal:7233 \
           --input-jsonl - \
-          --video-delay-seconds "$VIDEO_DELAY_SECONDS"
+          --video-delay-seconds "$VIDEO_DELAY_SECONDS" \
+          --analysis-timeout-seconds "$ANALYSIS_TIMEOUT_SECONDS" \
+          --max-wait-next-phrase-seconds "$MAX_WAIT_NEXT_PHRASE_SECONDS"
 else
   python texte/realtime_transcript_fusion.py "$@" \
     | docker compose run --rm -T workflows-launcher \
         python workflows/debate_jsonl_to_temporal.py \
           --address temporal:7233 \
           --input-jsonl - \
-          --video-delay-seconds "$VIDEO_DELAY_SECONDS"
+          --video-delay-seconds "$VIDEO_DELAY_SECONDS" \
+          --analysis-timeout-seconds "$ANALYSIS_TIMEOUT_SECONDS" \
+          --max-wait-next-phrase-seconds "$MAX_WAIT_NEXT_PHRASE_SECONDS"
 fi
