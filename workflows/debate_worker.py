@@ -3,6 +3,8 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import importlib
+import os
 
 from temporalio.client import Client
 from temporalio.worker import Worker
@@ -35,15 +37,18 @@ def parse_args() -> argparse.Namespace:
 
 async def run() -> int:
     args = parse_args()
+    impl = os.getenv("FACT_CHECK_ACTIVITY_IMPL", "local").strip().lower()
+    module_name = "activities_emma" if impl in {"emma", "activities_emma"} else "activities"
     try:
-        from activities import (
-            analyze_debate_line,
-            check_next_phrase_self_correction,
-            post_fact_check_result,
+        activities_module = importlib.import_module(module_name)
+        analyze_debate_line = activities_module.analyze_debate_line
+        check_next_phrase_self_correction = (
+            activities_module.check_next_phrase_self_correction
         )
+        post_fact_check_result = activities_module.post_fact_check_result
     except Exception as exc:
         print(
-            "[temporal-worker] impossible de charger activities.py. "
+            f"[temporal-worker] impossible de charger {module_name}.py. "
             "Verifie les dependances et les cles dans cle.env "
             "(MISTRAL_API_KEY, FACT_CHECK_POST_URL)."
         )
@@ -63,7 +68,8 @@ async def run() -> int:
     )
     print(
         f"[temporal-worker] listening task_queue={args.task_queue} "
-        f"namespace={args.namespace} address={args.address}"
+        f"namespace={args.namespace} address={args.address} "
+        f"activities_module={module_name}"
     )
     await worker.run()
     return 0

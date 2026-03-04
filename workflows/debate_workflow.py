@@ -54,27 +54,43 @@ def _format_utc_iso_millis(value: datetime) -> str:
     )
 
 
-def _collect_sources(analysis_result: dict[str, Any]) -> list[dict[str, str]]:
+def _normalize_sources(raw_sources: Any) -> list[dict[str, str]]:
+    if not isinstance(raw_sources, list):
+        return []
+
     collected: list[dict[str, str]] = []
     seen_urls: set[str] = set()
+    for item in raw_sources:
+        if not isinstance(item, dict):
+            continue
+        organization = item.get("organization")
+        url = item.get("url")
+        if not isinstance(organization, str) or not isinstance(url, str):
+            continue
+        org = organization.strip()
+        href = url.strip()
+        if not org or not href or not _is_http_url(href):
+            continue
+        if href in seen_urls:
+            continue
+        seen_urls.add(href)
+        collected.append({"organization": org, "url": href})
+    return collected
 
-    sources = analysis_result.get("sources")
-    if isinstance(sources, list):
-        for item in sources:
-            if not isinstance(item, dict):
-                continue
-            organization = item.get("organization")
-            url = item.get("url")
-            if not isinstance(organization, str) or not isinstance(url, str):
-                continue
-            org = organization.strip()
-            href = url.strip()
-            if not org or not href or not _is_http_url(href):
-                continue
+
+def _collect_sources(analysis_result: dict[str, Any]) -> list[dict[str, str]]:
+    collected: list[dict[str, str]] = _normalize_sources(analysis_result.get("sources"))
+    seen_urls: set[str] = {source["url"] for source in collected}
+
+    nested_analysis = analysis_result.get("analysis")
+    if isinstance(nested_analysis, dict):
+        nested_sources = _normalize_sources(nested_analysis.get("sources"))
+        for source in nested_sources:
+            href = source["url"]
             if href in seen_urls:
                 continue
             seen_urls.add(href)
-            collected.append({"organization": org, "url": href})
+            collected.append(source)
 
     explications = analysis_result.get("explications")
     if isinstance(explications, dict):
@@ -98,6 +114,12 @@ def _collect_sources(analysis_result: dict[str, Any]) -> list[dict[str, str]]:
 
 
 def _summary_from_analysis_result(analysis_result: dict[str, Any]) -> str:
+    ready_analysis = analysis_result.get("analysis")
+    if isinstance(ready_analysis, dict):
+        ready_summary = ready_analysis.get("summary")
+        if isinstance(ready_summary, str) and ready_summary.strip():
+            return ready_summary.strip()
+
     summary_parts: list[str] = []
     explications = analysis_result.get("explications")
 
@@ -133,6 +155,43 @@ def _summary_from_analysis_result(analysis_result: dict[str, Any]) -> str:
     return ""
 
 
+def _infer_non_postable_reason(
+    current_json: dict[str, Any], analysis_result: Any
+) -> str:
+    if not isinstance(analysis_result, dict):
+        return "analysis_not_dict"
+    if not bool(analysis_result.get("afficher_bandeau", False)):
+        return "afficher_bandeau_false"
+
+    ready_claim = analysis_result.get("claim")
+    ready_analysis = analysis_result.get("analysis")
+    if isinstance(ready_claim, dict) and isinstance(ready_analysis, dict):
+        ready_claim_text = ready_claim.get("text")
+        ready_summary = ready_analysis.get("summary")
+        ready_sources = ready_analysis.get("sources")
+        if not (isinstance(ready_claim_text, str) and ready_claim_text.strip()):
+            return "missing_claim_text"
+        if not (isinstance(ready_summary, str) and ready_summary.strip()):
+            return "missing_summary"
+        if not isinstance(ready_sources, list):
+            return "missing_sources"
+        if not _normalize_sources(ready_sources):
+            return "no_valid_sources"
+
+    claim_text = _claim_text_from_current_json(current_json)
+    if not claim_text:
+        return "missing_claim_text"
+
+    summary = _summary_from_analysis_result(analysis_result)
+    if not summary:
+        return "missing_summary"
+
+    if not _collect_sources(analysis_result):
+        return "no_valid_sources"
+
+    return "unknown"
+
+
 def _build_fact_check_api_payload(
     current_json: dict[str, Any], analysis_result: Any
 ) -> dict[str, Any] | None:
@@ -141,6 +200,37 @@ def _build_fact_check_api_payload(
 
     if not bool(analysis_result.get("afficher_bandeau", False)):
         return None
+
+    # Support Emma-style activities output that is already API-ready.
+    ready_claim = analysis_result.get("claim")
+    ready_analysis = analysis_result.get("analysis")
+    if isinstance(ready_claim, dict) and isinstance(ready_analysis, dict):
+        ready_claim_text = ready_claim.get("text")
+        ready_summary = ready_analysis.get("summary")
+        ready_sources = ready_analysis.get("sources")
+        if (
+            isinstance(ready_claim_text, str)
+            and ready_claim_text.strip()
+            and isinstance(ready_summary, str)
+            and ready_summary.strip()
+            and isinstance(ready_sources, list)
+        ):
+            normalized_sources = _normalize_sources(ready_sources)
+            if normalized_sources:
+                ready_verdict = analysis_result.get("overall_verdict")
+                verdict_value = (
+                    str(ready_verdict).strip()
+                    if isinstance(ready_verdict, str) and ready_verdict.strip()
+                    else "inconnu"
+                )
+                return {
+                    "claim": {"text": ready_claim_text.strip()[:2000]},
+                    "analysis": {
+                        "summary": ready_summary.strip()[:3000],
+                        "sources": normalized_sources[:8],
+                    },
+                    "overall_verdict": verdict_value[:100],
+                }
 
     claim_text = _claim_text_from_current_json(current_json)
     if not claim_text:
@@ -241,10 +331,18 @@ class DebateJsonNoopWorkflow:
         else:
             post_payload = _build_fact_check_api_payload(current_json, analysis_result)
             if post_payload is None:
+                details = _infer_non_postable_reason(current_json, analysis_result)
+                if isinstance(analysis_result, dict):
+                    analysis_result = {
+                        **analysis_result,
+                        "afficher_bandeau": False,
+                        "raison": f"Fact-check ignore: {details}.",
+                    }
                 post_result = {
                     "posted": False,
                     "skipped": True,
                     "reason": "analysis_not_postable",
+                    "details": details,
                 }
             else:
                 post_result = await workflow.execute_activity(

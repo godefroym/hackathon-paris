@@ -103,7 +103,7 @@ export TEE_JSONL_PATH=debate_stream_elevenlabs.jsonl
   --question-posee ""
 ```
 
-## Realtime STT fusion (Mistral + ElevenLabs)
+## Realtime STT fusion (Mistral only)
 
 ```bash
 cd /Users/godefroy.meynard/Documents/test_datagouv_mcp/hackaton_audio/hackathon-paris
@@ -116,7 +116,6 @@ python texte/realtime_transcript_fusion.py \
   --personne "Valerie Pecresse" \
   --source-video "TF1 20h" \
   --question-posee "" \
-  --providers both \
   --language-mode fixed \
   --language-code fr \
   --preferred-provider mistral \
@@ -124,9 +123,9 @@ python texte/realtime_transcript_fusion.py \
   --show-decisions
 ```
 
-Arbitration behavior:
-- if the two transcripts are very similar, heuristic picks the better candidate.
-- if they differ significantly, a light Mistral judge (`mistral-small-latest`) selects the best one using recent phrase context.
+Provider behavior:
+- ElevenLabs is disabled in the fusion pipeline for stability.
+- The script always emits the Mistral transcript stream (same JSON schema and Temporal wiring).
 
 Main knobs:
 - `--disable-llm-judge` to force heuristic-only mode.
@@ -159,4 +158,4 @@ export TEE_JSONL_PATH=debate_stream_fusion.jsonl
 - Default mode is `--commit-strategy vad` for phrase-level commits.
 - Default language mode is `--language-mode auto` (multi-language).
 - Use `--show-partials` if you want partial transcript logs in stderr.
-- This script uses `wss://api.elevenlabs.io/v1/speech-to-text/realtime`.
+- `run_fusion_to_temporal.sh` forces `--providers mistral`.

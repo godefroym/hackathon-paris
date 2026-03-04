@@ -230,6 +230,7 @@ services:
         condition: service_healthy
     environment:
       FACT_CHECK_POST_URL: ${FACT_CHECK_POST_URL:-http://app-web:8000/api/stream/fact-check}
+      FACT_CHECK_ACTIVITY_IMPL: ${FACT_CHECK_ACTIVITY_IMPL:-local}
     command: [ "python", "workflows/debate_worker.py", "--address", "temporal:7233" ]
 
   workflows-launcher:

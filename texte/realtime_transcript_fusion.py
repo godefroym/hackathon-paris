@@ -194,7 +194,18 @@ async def broadcast_microphone(
             input_device_index=input_device_index,
         ):
             for q in queues:
-                await q.put(chunk)
+                try:
+                    q.put_nowait(chunk)
+                except asyncio.QueueFull:
+                    # Keep most recent audio when a downstream provider is reconnecting.
+                    try:
+                        q.get_nowait()
+                    except asyncio.QueueEmpty:
+                        pass
+                    try:
+                        q.put_nowait(chunk)
+                    except asyncio.QueueFull:
+                        pass
     finally:
         for q in queues:
             while True:
@@ -696,53 +707,88 @@ async def run_mistral_stream(
     audio_stream: AsyncIterator[bytes],
     events: asyncio.Queue[CandidateUtterance | ProviderClosed],
 ) -> None:
+    def is_recoverable_stream_error(exc: Exception) -> bool:
+        message = str(exc).lower()
+        recoverable_markers = (
+            "enginedeaderror",
+            "grpc streaming transcription error",
+            "statuscode.unknown",
+            "status 500",
+            "service unavailable",
+            "connection reset",
+            "timed out",
+        )
+        return any(marker in message for marker in recoverable_markers)
+
     pending = ""
     pending_start: datetime | None = None
     full_text = ""
     audio_format = AudioFormat(encoding="pcm_s16le", sample_rate=sample_rate)
     start_compensation = timedelta(milliseconds=max(0, int(delay_ms)))
+    reconnect_attempt = 0
+    max_reconnect_attempts = 8
     try:
-        async for event in client.audio.realtime.transcribe_stream(
-            audio_stream=audio_stream,
-            model=model,
-            audio_format=audio_format,
-            target_streaming_delay_ms=delay_ms,
-        ):
-            if isinstance(event, RealtimeTranscriptionSessionCreated):
-                print("[mistral] session connected", file=sys.stderr, flush=True)
-                continue
-            if isinstance(event, TranscriptionStreamTextDelta):
-                event_time = datetime.now(timezone.utc)
-                full_text += event.text
-                if pending_start is None and event.text.strip():
-                    pending_start = event_time - start_compensation
-                pending += event.text
-                complete_sentences, pending = split_complete_sentences(pending)
-                for sentence in complete_sentences:
-                    sentence_start = pending_start or (event_time - start_compensation)
-                    duration_based_start = event_time - timedelta(
-                        seconds=estimate_phrase_duration_seconds(sentence)
-                    )
-                    if duration_based_start < sentence_start:
-                        sentence_start = duration_based_start
-                    await events.put(
-                        CandidateUtterance(
-                            provider="mistral",
-                            text=sentence,
-                            start_timestamp=sentence_start,
-                            timestamp=event_time,
-                        )
-                    )
-                    pending_start = event_time - start_compensation
-                if not pending.strip():
-                    pending_start = None
-                continue
-            if isinstance(event, TranscriptionStreamDone):
+        while True:
+            try:
+                async for event in client.audio.realtime.transcribe_stream(
+                    audio_stream=audio_stream,
+                    model=model,
+                    audio_format=audio_format,
+                    target_streaming_delay_ms=delay_ms,
+                ):
+                    if isinstance(event, RealtimeTranscriptionSessionCreated):
+                        reconnect_attempt = 0
+                        print("[mistral] session connected", file=sys.stderr, flush=True)
+                        continue
+                    if isinstance(event, TranscriptionStreamTextDelta):
+                        event_time = datetime.now(timezone.utc)
+                        full_text += event.text
+                        if pending_start is None and event.text.strip():
+                            pending_start = event_time - start_compensation
+                        pending += event.text
+                        complete_sentences, pending = split_complete_sentences(pending)
+                        for sentence in complete_sentences:
+                            sentence_start = pending_start or (event_time - start_compensation)
+                            duration_based_start = event_time - timedelta(
+                                seconds=estimate_phrase_duration_seconds(sentence)
+                            )
+                            if duration_based_start < sentence_start:
+                                sentence_start = duration_based_start
+                            await events.put(
+                                CandidateUtterance(
+                                    provider="mistral",
+                                    text=sentence,
+                                    start_timestamp=sentence_start,
+                                    timestamp=event_time,
+                                )
+                            )
+                            pending_start = event_time - start_compensation
+                        if not pending.strip():
+                            pending_start = None
+                        continue
+                    if isinstance(event, TranscriptionStreamDone):
+                        return
+                    if isinstance(event, RealtimeTranscriptionError):
+                        raise RuntimeError(f"Mistral realtime error: {event.error}")
+                    if isinstance(event, UnknownRealtimeEvent):
+                        continue
                 return
-            if isinstance(event, RealtimeTranscriptionError):
-                raise RuntimeError(f"Mistral realtime error: {event.error}")
-            if isinstance(event, UnknownRealtimeEvent):
-                continue
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:
+                if not is_recoverable_stream_error(exc) or reconnect_attempt >= max_reconnect_attempts:
+                    raise RuntimeError(f"Mistral realtime error: {exc}") from exc
+                reconnect_attempt += 1
+                backoff_seconds = min(8.0, 0.8 * (2 ** (reconnect_attempt - 1)))
+                jitter = random.uniform(0.0, 0.35)
+                wait_seconds = backoff_seconds + jitter
+                print(
+                    "[mistral] stream error; reconnecting "
+                    f"(attempt {reconnect_attempt}/{max_reconnect_attempts}) in {wait_seconds:.2f}s: {exc}",
+                    file=sys.stderr,
+                    flush=True,
+                )
+                await asyncio.sleep(wait_seconds)
     finally:
         await events.put(ProviderClosed(provider="mistral"))
 
@@ -1113,14 +1159,13 @@ async def fusion_export_loop(
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description=(
-            "Realtime fusion STT: Mistral + ElevenLabs in parallel, "
-            "then choose best sentence and output one JSON line per phrase."
+            "Realtime STT pipeline (Mistral-only): emits one JSON line per phrase."
         )
     )
     parser.add_argument(
         "--providers",
         choices=["both", "mistral", "elevenlabs"],
-        default="both",
+        default="mistral",
         help="Transcription providers to run",
     )
     parser.add_argument(
@@ -1182,7 +1227,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--chunk-duration-ms",
         type=int,
-        default=40,
+        default=480,
         help="Microphone chunk size in milliseconds",
     )
     parser.add_argument(
@@ -1342,16 +1387,17 @@ async def run() -> int:
         print("--cleanup-timeout-seconds must be > 0", file=sys.stderr)
         return 1
 
-    active_providers: set[str]
-    if args.providers == "both":
-        active_providers = {"mistral", "elevenlabs"}
-    elif args.providers == "mistral":
-        active_providers = {"mistral"}
-    else:
-        active_providers = {"elevenlabs"}
+    if args.providers != "mistral":
+        print(
+            f"[info] ElevenLabs disabled for stability: forcing providers=mistral "
+            f"(requested={args.providers})",
+            file=sys.stderr,
+            flush=True,
+        )
+    args.providers = "mistral"
+    active_providers: set[str] = {"mistral"}
 
     mistral_key = args.mistral_api_key.strip()
-    eleven_key = args.elevenlabs_api_key.strip()
     use_llm_cleanup = args.cleanup_mode != "none"
 
     if "mistral" in active_providers and not mistral_key:
@@ -1367,14 +1413,6 @@ async def run() -> int:
             file=sys.stderr,
         )
         return 1
-    if "elevenlabs" in active_providers and not eleven_key:
-        print(
-            "Missing ElevenLabs API key: add ELEVENLABS_API_KEY in cle.env "
-            "(repo root) or pass --elevenlabs-api-key.",
-            file=sys.stderr,
-        )
-        return 1
-
     language_code = args.language_code.strip().lower()
     if args.language_mode == "fixed" and not language_code and "elevenlabs" in active_providers:
         print("--language-mode fixed requires --language-code.", file=sys.stderr)

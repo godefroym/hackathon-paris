@@ -19,7 +19,7 @@ fi
 source "$VENV_PATH"
 
 if [[ -n "$TEE_JSONL_PATH" ]]; then
-  python texte/realtime_transcript_fusion.py "$@" \
+  python texte/realtime_transcript_fusion.py "$@" --providers mistral \
     | tee "$TEE_JSONL_PATH" \
     | docker compose run --rm -T workflows-launcher \
         python workflows/debate_jsonl_to_temporal.py \
@@ -29,7 +29,7 @@ if [[ -n "$TEE_JSONL_PATH" ]]; then
           --analysis-timeout-seconds "$ANALYSIS_TIMEOUT_SECONDS" \
           --max-wait-next-phrase-seconds "$MAX_WAIT_NEXT_PHRASE_SECONDS"
 else
-  python texte/realtime_transcript_fusion.py "$@" \
+  python texte/realtime_transcript_fusion.py "$@" --providers mistral \
     | docker compose run --rm -T workflows-launcher \
         python workflows/debate_jsonl_to_temporal.py \
           --address temporal:7233 \

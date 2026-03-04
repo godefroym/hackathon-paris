@@ -35,6 +35,7 @@ POST payload sent by the workflow:
 Main timing variables (in `cle.env` or CLI):
 - `VIDEO_STREAM_DELAY_SECONDS` (default: 30)
 - `FACT_CHECK_ANALYSIS_TIMEOUT_SECONDS` (default: 30)
+- `FACT_CHECK_ACTIVITY_IMPL` (`local` or `emma`, default: `local`)
 
 ### Run
 
@@ -98,4 +99,12 @@ Useful commands:
 ```bash
 ./scripts/run_stack.sh ps
 ./scripts/run_stack.sh logs workflows-worker
+```
+
+Switch worker implementation to Emma's activities for tests:
+
+```bash
+cd ..
+FACT_CHECK_ACTIVITY_IMPL=emma docker compose up -d --build workflows-worker
+docker compose logs --tail=40 workflows-worker
 ```
