@@ -15,10 +15,8 @@ attempt=0
 until temporal operator cluster health --address $TEMPORAL_ADDRESS; do
   attempt=$((attempt + 1))
   if [ $attempt -ge $max_attempts ]; then
-    echo "Server did not become healthy after $max_attempts attempts"
     exit 1
   fi
-  echo "Server not ready yet, waiting... (attempt $attempt/$max_attempts)"
   sleep 5
 done
 

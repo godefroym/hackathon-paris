@@ -9,9 +9,7 @@ This folder contains the Temporal wiring for the real-time transcript pipeline:
   `analyze_debate_line` from `activities.py`.
 - `debate_jsonl_to_temporal.py`: reads JSONL (file or stdin) and starts one
   workflow per line.
-- `activities.py`: after analysis, posts workflow result to
-  `http://localhost:8000/api/stream/fact-check` (configurable via
-  `FACT_CHECK_POST_URL`).
+- `activities.py`: The core "Brain" of the system. Uses a multi-agent `AgentPool` (Mistral Agents API) with specialized experts and a quality-control `Judge` agent.
 
 For each transcript line, the launcher sends:
 - `current_json`: the original JSON line.
