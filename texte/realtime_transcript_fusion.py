@@ -929,6 +929,7 @@ async def fusion_export_loop(
     personne: str,
     question_posee: str,
     source_video: str,
+    pipeline_language: str,
     recent_window: int,
     active_providers: set[str],
     pair_max_skew_seconds: float,
@@ -1020,6 +1021,7 @@ async def fusion_export_loop(
             "affirmation_courante": final_sentence,
             "metadata": {
                 "source_video": source_video,
+                "pipeline_language": pipeline_language,
                 "timestamp_elapsed": f"{mm:02d}:{ss:02d}",
                 "timestamp_start": format_utc_iso_millis(start_ts),
                 "timestamp_end": format_utc_iso_millis(ts),
@@ -1161,6 +1163,11 @@ def parse_args() -> argparse.Namespace:
         description=(
             "Realtime STT pipeline (Mistral-only): emits one JSON line per phrase."
         )
+    )
+    parser.add_argument(
+        "--pipeline-language",
+        default=os.environ.get("PIPELINE_LANGUAGE", "fr"),
+        help="Pipeline language (fr|en): expected transcription language and downstream output language",
     )
     parser.add_argument(
         "--providers",
@@ -1365,6 +1372,11 @@ async def run() -> int:
         print(json.dumps(list_input_devices(), ensure_ascii=False, indent=2))
         return 0
 
+    pipeline_language = args.pipeline_language.strip().lower()
+    if pipeline_language not in {"fr", "en"}:
+        print("--pipeline-language must be one of: fr, en", file=sys.stderr)
+        return 1
+
     if args.recent_window < 1:
         print("--recent-window must be >= 1", file=sys.stderr)
         return 1
@@ -1414,6 +1426,8 @@ async def run() -> int:
         )
         return 1
     language_code = args.language_code.strip().lower()
+    if args.language_mode == "fixed" and not language_code:
+        language_code = pipeline_language
     if args.language_mode == "fixed" and not language_code and "elevenlabs" in active_providers:
         print("--language-mode fixed requires --language-code.", file=sys.stderr)
         return 1
@@ -1436,6 +1450,17 @@ async def run() -> int:
     print(f"[info] personne JSON: {personne}", file=sys.stderr, flush=True)
     print(
         f"[info] providers: {', '.join(sorted(active_providers))}",
+        file=sys.stderr,
+        flush=True,
+    )
+    print(
+        f"[info] pipeline language: {pipeline_language}",
+        file=sys.stderr,
+        flush=True,
+    )
+    print(
+        "[info] mistral realtime SDK has no explicit language parameter; "
+        "language control is applied downstream via PIPELINE_LANGUAGE.",
         file=sys.stderr,
         flush=True,
     )
@@ -1524,6 +1549,7 @@ async def run() -> int:
                 personne=personne,
                 question_posee=args.question_posee,
                 source_video=args.source_video,
+                pipeline_language=pipeline_language,
                 recent_window=args.recent_window,
                 active_providers=active_providers,
                 pair_max_skew_seconds=args.pair_max_skew_seconds,

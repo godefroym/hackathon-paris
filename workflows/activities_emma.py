@@ -44,8 +44,56 @@ CACHE_RESULTATS_GLOBAUX = {}
 TIER_1_GOUV = ["gouv.fr", "insee.fr", "senat.fr", "assemblee-nationale.fr", "vie-publique.fr", "data.gouv.fr", "ameli.fr", "inserm.fr","ansm.sante.fr","anses.fr","service-publics.fr","conseil-etat.fr","actu-juridique.fr","banque-france.fr","cnrs.fr","iniria.fr","cea.fr","archives-ouvertes.fr","cnes.fr","techniques-ingenieur.fr"]
 TIER_2_MEDIAS = ["lemonde.fr", "lefigaro.fr", "liberation.fr", "humanite.fr", "marianne.net", "francetvinfo.fr", "radiofrance.fr", "lesechos.fr", "ouest-france.fr", "france24.com", "franceinfo.fr", "20minutes.fr", "actu.orange.fr", "tf1info.fr","lexpress.fr","dalloz-actualite.fr","ofce.sciences-po.fr","75secondes.fr","legifiscal.fr","fr.wikipedia.org","reporterre.net","mouvement-europeen.eu"]
 SOCIAL_BLACKLIST = ["tiktok.com", "facebook.com", "instagram.com", "x.com", "twitter.com", "youtube.com", "linkedin.com", "reddit.com", "pinterest.com", "4chan.org"]
+NON_FACTUAL_MARKERS = (
+    "allo",
+    "allô",
+    "test",
+    "ok",
+    "okay",
+    "euh",
+    "deux secondes",
+    "on prend",
+    "ça marche",
+    "ca marche",
+    "je vais",
+    "on va",
+    "putain",
+    "ta gueule",
+)
+FACT_KEYWORDS = (
+    "pib",
+    "dette",
+    "population",
+    "habitants",
+    "terre",
+    "monde",
+    "france",
+    "euro",
+    "euros",
+    "milliard",
+    "million",
+    "pourcent",
+)
+FACT_VERBS = (
+    " est ",
+    " sont ",
+    " a ",
+    " ont ",
+    " compte ",
+    " represente ",
+    " représente ",
+    " depasse ",
+    " dépasse ",
+    " mesure ",
+    " vaut ",
+)
 
 DEFAULT_FACT_CHECK_POST_URL = "http://localhost:8000/api/stream/fact-check"
+PIPELINE_LANGUAGE = os.getenv("PIPELINE_LANGUAGE", "fr").strip().lower() or "fr"
+if PIPELINE_LANGUAGE not in {"fr", "en"}:
+    PIPELINE_LANGUAGE = "fr"
+FACT_CHECK_OUTPUT_LANGUAGE = PIPELINE_LANGUAGE
+FACT_CHECK_PIVOT_LANGUAGE = "fr"
 
 # =============================================================================
 # 2. SCHÉMAS PYDANTIC 
@@ -129,14 +177,285 @@ def _normalize_sources(raw_sources: list[Any]) -> list[dict[str, str]]:
         normalized.append({"organization": organization[:255], "url": url[:2048]})
     return normalized
 
+def _split_sentences(text: str) -> list[str]:
+    if not isinstance(text, str):
+        return []
+    return [
+        sentence.strip(" \t\n\r\"'")
+        for sentence in re.split(r"[.!?]+", text)
+        if sentence and sentence.strip()
+    ]
+
+
+def _extract_fact_focus_text(data: dict[str, Any], clean_text: str) -> str:
+    # Prioritize the current sentence from ingestion payload.
+    current = data.get("affirmation_courante")
+    if isinstance(current, str) and current.strip():
+        focus_candidates = _split_sentences(current)
+        if focus_candidates:
+            return focus_candidates[-1]
+        return current.strip()
+
+    focus_candidates = _split_sentences(clean_text)
+    if focus_candidates:
+        stat_markers = (
+            "%",
+            "pourcent",
+            "milliard",
+            "million",
+            "euro",
+            "pib",
+            "dette",
+            "population",
+            "habitants",
+            "terre",
+            "monde",
+        )
+        prioritized = [
+            sentence
+            for sentence in focus_candidates
+            if re.search(r"\d", sentence)
+            or any(marker in sentence.lower() for marker in stat_markers)
+        ]
+        return (prioritized or focus_candidates)[-1]
+    return clean_text.strip()
+
+
+def _is_non_factual_sentence(sentence: str) -> bool:
+    text = (sentence or "").strip().lower()
+    if not text:
+        return True
+    words = re.findall(r"[a-zA-ZÀ-ÿ0-9]+", text)
+    if len(words) < 3:
+        return True
+    if text.endswith("?"):
+        return True
+    return any(marker in text for marker in NON_FACTUAL_MARKERS)
+
+
+def _is_atomic_fact_candidate(sentence: str) -> bool:
+    text = (sentence or "").strip()
+    lower = text.lower()
+    if _is_non_factual_sentence(text):
+        return False
+    if re.search(r"\d", text):
+        return True
+    if any(keyword in lower for keyword in FACT_KEYWORDS):
+        return True
+    return any(verb in f" {lower} " for verb in FACT_VERBS)
+
+
+def _extract_atomic_fact_assertion(data: dict[str, Any], clean_text: str) -> str:
+    # Prefer the most recent current sentence from ingestion.
+    primary_text = data.get("affirmation_courante")
+    if not isinstance(primary_text, str) or not primary_text.strip():
+        primary_text = clean_text
+
+    primary_sentences = _split_sentences(primary_text)
+    factual_primary = [
+        sentence for sentence in primary_sentences if _is_atomic_fact_candidate(sentence)
+    ]
+    if factual_primary:
+        return factual_primary[-1]
+
+    clean_sentences = _split_sentences(clean_text)
+    factual_clean = [
+        sentence for sentence in clean_sentences if _is_atomic_fact_candidate(sentence)
+    ]
+    if factual_clean:
+        return factual_clean[-1]
+
+    return _extract_fact_focus_text(data, clean_text)
+
+
+def _extract_urls_from_text(text: str) -> list[str]:
+    if not isinstance(text, str):
+        return []
+    return re.findall(r"https?://[^\s\]>)\"']+", text)
+
+
+def _extract_numbers(text: str) -> list[str]:
+    if not isinstance(text, str):
+        return []
+    return re.findall(r"\d+(?:[.,]\d+)?", text)
+
+
+def _has_numeric_drift(original_text: str, cleaned_text: str) -> bool:
+    original_numbers = _extract_numbers(original_text)
+    cleaned_numbers = _extract_numbers(cleaned_text)
+    if not original_numbers:
+        return False
+    # Keep original assertion if cleaner altered or removed numeric values.
+    return original_numbers != cleaned_numbers
+
+
+def _normalize_language_code(value: Any) -> str:
+    if not isinstance(value, str):
+        return "unknown"
+    normalized = value.strip().lower()
+    if not normalized:
+        return "unknown"
+    if normalized.startswith("fr"):
+        return "fr"
+    if normalized.startswith("en"):
+        return "en"
+    return normalized.split("-", 1)[0]
+
+
+async def _mistral_json_completion(prompt: str, *, model: str = _FAST_MODEL) -> dict[str, Any]:
+    try:
+        res = await client.chat.complete_async(
+            model=model,
+            messages=[{"role": "user", "content": prompt}],
+            response_format={"type": "json_object"},
+        )
+        content = res.choices[0].message.content
+        if isinstance(content, str):
+            parsed = json.loads(content)
+            if isinstance(parsed, dict):
+                return parsed
+    except Exception as exc:
+        print(f"⚠️ Erreur mistral_json_completion: {exc}")
+    return {}
+
+
+async def _translate_to_french_with_detection(text: str) -> tuple[str, str]:
+    source = (text or "").strip()
+    if not source:
+        return "unknown", ""
+
+    prompt = f"""
+Tu es un traducteur strict.
+Texte d'entrée:
+\"\"\"{source}\"\"\"
+
+Réponds UNIQUEMENT en JSON:
+{{
+  "detected_language": "fr|en|other",
+  "text_fr": "..."
+}}
+
+Règles:
+- Si le texte est déjà en français, "text_fr" = texte original (corrigé minimalement).
+- Conserve exactement les nombres, unités, noms propres, négations et sens.
+- N'invente pas d'information.
+"""
+    parsed = await _mistral_json_completion(prompt, model=_FAST_MODEL)
+    detected = _normalize_language_code(parsed.get("detected_language"))
+    translated = parsed.get("text_fr")
+    if not isinstance(translated, str) or not translated.strip():
+        translated = source
+    return detected, translated.strip()
+
+
+async def _translate_from_french(text: str, target_language: str) -> str:
+    source = (text or "").strip()
+    target = _normalize_language_code(target_language)
+    if not source:
+        return ""
+    if target in {"fr", "unknown"}:
+        return source
+
+    prompt = f"""
+Translate strictly from French to {target}.
+Input:
+\"\"\"{source}\"\"\"
+
+Return ONLY JSON:
+{{
+  "text": "..."
+}}
+
+Rules:
+- Preserve all numbers, units, named entities, negations, and URLs exactly.
+- Do not add or remove factual claims.
+"""
+    parsed = await _mistral_json_completion(prompt, model=_FAST_MODEL)
+    translated = parsed.get("text")
+    if not isinstance(translated, str) or not translated.strip():
+        return source
+    return translated.strip()
+
+
+def _build_source_queries(base_query: str, *, category: str, speaker: str = "") -> list[str]:
+    cleaned_base = (base_query or "").strip()
+    if not cleaned_base:
+        return []
+
+    queries = [
+        cleaned_base,
+        f"source officielle {cleaned_base}",
+        f"statistiques officielles {cleaned_base}",
+    ]
+
+    lowered = cleaned_base.lower()
+    if "france" in lowered:
+        queries.append(f"insee {cleaned_base}")
+    if "population" in lowered or "êtres humains" in lowered or "terre" in lowered or "monde" in lowered:
+        queries.append("population mondiale total banque mondiale ONU")
+    if "pib" in lowered:
+        queries.append("PIB France INSEE Banque mondiale NY.GDP.MKTP.CD")
+    if "dette" in lowered:
+        queries.append("dette publique France INSEE Banque de France")
+    if category == "coherence" and speaker:
+        queries.append(f"{speaker} archive déclaration {cleaned_base}")
+
+    deduped: list[str] = []
+    seen: set[str] = set()
+    for query in queries:
+        normalized = " ".join(query.split())
+        if len(normalized) < 10:
+            continue
+        key = normalized.lower()
+        if key in seen:
+            continue
+        seen.add(key)
+        deduped.append(normalized)
+    return deduped
+
+
+def _fallback_reference_sources(fact_focus_text: str) -> list[dict[str, str]]:
+    lower = (fact_focus_text or "").lower()
+    if any(token in lower for token in ("population", "êtres humains", "terre", "monde")):
+        return [
+            {
+                "organization": "data.worldbank.org",
+                "url": "https://data.worldbank.org/indicator/SP.POP.TOTL",
+            },
+            {
+                "organization": "population.un.org",
+                "url": "https://population.un.org/wpp/",
+            },
+        ]
+    if "pib" in lower and "france" in lower:
+        return [
+            {
+                "organization": "data.worldbank.org",
+                "url": "https://data.worldbank.org/indicator/NY.GDP.MKTP.CD?locations=FR",
+            }
+        ]
+    return []
+
+
 async def _search_and_sort_sources(query: str, allow_social: bool = False) -> list[dict]:
-    if len(query) < 10: return []
+    if len(query) < 10:
+        return []
     try:
         res = await client.beta.conversations.start_async(
             model=_SMART_MODEL, inputs=query, tools=[{"type": "web_search"}]
         )
         candidates = []
         for o in res.model_dump().get("outputs", []):
+            for url in _extract_urls_from_text(
+                json.dumps(o, ensure_ascii=False, default=str)
+            ):
+                host = _domain_to_organization(url)
+                score = _score_source(url)
+                if score > 0 or (allow_social and score == -1):
+                    final_score = score if score > 0 else 5
+                    candidates.append(
+                        {"url": url, "organization": host, "score": final_score}
+                    )
             if o.get("type") == "message.output" and isinstance(o.get("content"), list):
                 for chunk in o["content"]:
                     if isinstance(chunk, dict) and chunk.get("type") == "tool_reference":
@@ -147,12 +466,57 @@ async def _search_and_sort_sources(query: str, allow_social: bool = False) -> li
                             if score > 0 or (allow_social and score == -1):
                                 final_score = score if score > 0 else 5 
                                 candidates.append({"url": url, "organization": host, "score": final_score})
-                                
-        candidates.sort(key=lambda x: x.get("score", 0), reverse=True)
-        return [{"url": c["url"], "organization": c["organization"]} for c in candidates][:3] 
+
+        deduped: list[dict[str, Any]] = []
+        seen_urls: set[str] = set()
+        for candidate in sorted(candidates, key=lambda x: x.get("score", 0), reverse=True):
+            url = candidate.get("url", "").strip()
+            if not _is_http_url(url) or url in seen_urls:
+                continue
+            seen_urls.add(url)
+            deduped.append(candidate)
+        return [{"url": c["url"], "organization": c["organization"]} for c in deduped][:3]
     except Exception as e:
         print(f"⚠️ Erreur recherche: {e}")
         return []
+
+
+async def _search_sources_with_fallbacks(
+    *,
+    base_query: str,
+    category: str,
+    allow_social: bool = False,
+    speaker: str = "",
+) -> list[dict[str, str]]:
+    queries = _build_source_queries(base_query, category=category, speaker=speaker)
+    collected: list[dict[str, str]] = []
+    seen_urls: set[str] = set()
+
+    for query in queries[:6]:
+        current = await _search_and_sort_sources(query, allow_social=allow_social)
+        for source in current:
+            url = source.get("url", "").strip()
+            if not _is_http_url(url) or url in seen_urls:
+                continue
+            seen_urls.add(url)
+            collected.append(source)
+        if len(collected) >= 3:
+            break
+
+    if not collected:
+        fallback_sources = _fallback_reference_sources(base_query)
+        for source in fallback_sources:
+            url = source.get("url", "").strip()
+            if not _is_http_url(url) or url in seen_urls:
+                continue
+            seen_urls.add(url)
+            collected.append(source)
+        if fallback_sources:
+            print(
+                f"🧭 [SOURCES] fallback statique utilise ({len(fallback_sources)})"
+            )
+
+    return collected[:3]
 
 # =============================================================================
 # 4. PROMPTS 
@@ -279,33 +643,76 @@ async def analyze_debate_line(current_json: dict, last_minute_json: dict) -> dic
     data = copy.deepcopy(current_json)
     if "question_posee" in data and "question" not in data:
         data["question"] = data["question_posee"]
-        
-    phrase_id = hashlib.md5(data.get('affirmation', '').strip().lower().encode()).hexdigest()
+
+    # IMPORTANT: evaluate only the latest utterance.
+    current_assertion = str(
+        data.get("affirmation_courante")
+        if isinstance(data.get("affirmation_courante"), str) and data.get("affirmation_courante").strip()
+        else data.get("affirmation", "")
+    ).strip()
+    if not current_assertion:
+        return {
+            "claim": {"text": ""},
+            "analysis": {"summary": "", "sources": []},
+            "overall_verdict": "unverified",
+            "afficher_bandeau": False,
+            "raison": "Fact-check ignore: empty_current_assertion.",
+        }
+
+    phrase_id = hashlib.md5(current_assertion.lower().encode()).hexdigest()
     if phrase_id in CACHE_RESULTATS_GLOBAUX: return CACHE_RESULTATS_GLOBAUX[phrase_id]
 
-    print(f"\n🎬 DÉBUT ANALYSE : '{data.get('affirmation', '')}'")
+    print(f"\n🎬 DÉBUT ANALYSE : '{current_assertion}'")
+
+    output_language = (
+        FACT_CHECK_OUTPUT_LANGUAGE
+        if FACT_CHECK_OUTPUT_LANGUAGE in {"fr", "en"}
+        else PIPELINE_LANGUAGE
+    )
+    input_language, assertion_fr = await _translate_to_french_with_detection(
+        current_assertion
+    )
+    if not assertion_fr:
+        assertion_fr = current_assertion
+    print(
+        f"🌍 LANGUES: input={input_language} pivot={FACT_CHECK_PIVOT_LANGUAGE} output={output_language}"
+    )
 
     # 1. NETTOYEUR (Uniquement orthographe)
-    nettoyage = await run_task("nettoyeur", build_cleaner_prompt(data.get('affirmation', '')))
+    nettoyage = await run_task("nettoyeur", build_cleaner_prompt(assertion_fr))
     clean_text = nettoyage.get("phrase_nette")
-    if not clean_text or len(clean_text) < 2: clean_text = data.get('affirmation', '')
+    if not clean_text or len(clean_text) < 2:
+        clean_text = assertion_fr
+    if _has_numeric_drift(assertion_fr, clean_text):
+        print("🛡️ [GARDE-FOU] Derive numerique detectee, conservation de la phrase originale.")
+        clean_text = assertion_fr
     print(f"✨ TEXTE NETTOYÉ : '{clean_text}'")
+    data_fr = copy.deepcopy(data)
+    data_fr["affirmation"] = assertion_fr
+    data_fr["affirmation_courante"] = assertion_fr
+
+    atomic_fact_text = _extract_atomic_fact_assertion(data_fr, clean_text)
+    if not atomic_fact_text or len(atomic_fact_text.strip()) < 2:
+        atomic_fact_text = str(clean_text or assertion_fr).strip()
+    fact_focus_text = atomic_fact_text
+    print(f"🎯 ASSERTION ATOMIQUE : '{atomic_fact_text}'")
+    print(f"🎯 PHRASE FACTUELLE CIBLE : '{fact_focus_text}'")
 
     # 2. ROUTEUR (Le vrai cerveau d'aiguillage)
-    texte_pour_routeur = clean_text + (f" (Q: {data['question']})" if data.get('question') else "")
+    texte_pour_routeur = atomic_fact_text + (f" (Q: {data['question']})" if data.get('question') else "")
     routage = await run_task("routeur", build_routeur_prompt(texte_pour_routeur))
     
     # 🔥 LE FILET DE SÉCURITÉ ANTI-NETTOYEUR TROP ZÉLÉ 🔥
     if routage.get("est_verifiable", True):
         if not routage.get("run_stats"):
-            texte_lower = data.get('affirmation', '').lower()
+            texte_lower = atomic_fact_text.lower()
             
             # 1. Recherche des mots-clés quantitatifs
             mots_stats = ["aucun", "zéro", "plus un seul", "tous", "%", "pourcent"]
             has_stat_word = any(mot in texte_lower for mot in mots_stats)
             
             # 2. Recherche intelligente de nombres (Exclut les années 19xx et 20xx)
-            nombres = re.findall(r'\b\d+\b', data.get('affirmation', ''))
+            nombres = re.findall(r'\b\d+\b', atomic_fact_text)
             has_real_number = False
             for n in nombres:
                 if not (len(n) == 4 and (n.startswith("19") or n.startswith("20"))):
@@ -319,7 +726,7 @@ async def analyze_debate_line(current_json: dict, last_minute_json: dict) -> dic
         print("🛡️ [GARDE-FOU] Opinion ou Futur détecté par le Routeur. Annulation.")
         obs_vide = {
             "claim": {
-                "text": str(data.get('affirmation', ''))
+                "text": str(atomic_fact_text)
             },
             "analysis": {
                 "summary": "",
@@ -337,29 +744,43 @@ async def analyze_debate_line(current_json: dict, last_minute_json: dict) -> dic
     tasks = []
     
     async def task_stat():
-        srcs = await _search_and_sort_sources(f"statistiques officielles France {clean_text}")
-        res = await run_agent_with_judge("statistique", build_stat_prompt(clean_text, json.dumps(srcs, ensure_ascii=False)))
+        srcs = await _search_sources_with_fallbacks(
+            base_query=fact_focus_text,
+            category="stat",
+        )
+        print(f"🔎 [SOURCES] stat={len(srcs)}")
+        res = await run_agent_with_judge("statistique", build_stat_prompt(atomic_fact_text, json.dumps(srcs, ensure_ascii=False)))
         if res: res["_srcs"] = srcs 
         return res
 
     async def task_contexte():
-        srcs = await _search_and_sort_sources(f"contexte factuel {clean_text}")
-        res = await run_agent_with_judge("contexte", build_contexte_prompt(clean_text, json.dumps(srcs, ensure_ascii=False)))
+        srcs = await _search_sources_with_fallbacks(
+            base_query=fact_focus_text,
+            category="contexte",
+        )
+        print(f"🔎 [SOURCES] contexte={len(srcs)}")
+        res = await run_agent_with_judge("contexte", build_contexte_prompt(atomic_fact_text, json.dumps(srcs, ensure_ascii=False)))
         if res: res["_srcs"] = srcs
         return res
         
     async def task_coherence():
-        srcs = await _search_and_sort_sources(f"archives {data.get('personne', 'politicien')} {clean_text}", allow_social=True)
-        res = await run_agent_with_judge("coherence", build_coherence_prompt(clean_text, json.dumps(srcs, ensure_ascii=False), data.get('personne', 'politicien')))
+        srcs = await _search_sources_with_fallbacks(
+            base_query=fact_focus_text,
+            category="coherence",
+            allow_social=True,
+            speaker=str(data.get("personne", "politicien")),
+        )
+        print(f"🔎 [SOURCES] coherence={len(srcs)}")
+        res = await run_agent_with_judge("coherence", build_coherence_prompt(atomic_fact_text, json.dumps(srcs, ensure_ascii=False), data.get('personne', 'politicien')))
         if res: res["_srcs"] = srcs
         return res
 
     async def task_rhetorique():
-        return await run_agent_with_judge("rhetorique", build_rhetorique_prompt(data.get('question', ''), clean_text))
+        return await run_agent_with_judge("rhetorique", build_rhetorique_prompt(data.get('question', ''), atomic_fact_text))
 
     if routage.get("run_stats"): tasks.append(task_stat())
     if routage.get("run_contexte"): tasks.append(task_contexte())
-    if routage.get("run_coherence_personnelle") and "toujours" in clean_text.lower(): tasks.append(task_coherence())
+    if routage.get("run_coherence_personnelle") and "toujours" in atomic_fact_text.lower(): tasks.append(task_coherence())
     if routage.get("run_rhetorique") and data.get("question"): tasks.append(task_rhetorique())
     
     rapports = await asyncio.gather(*tasks) if tasks else []
@@ -370,6 +791,7 @@ async def analyze_debate_line(current_json: dict, last_minute_json: dict) -> dic
         if "_srcs" in r:
             toutes_les_sources.extend(r["_srcs"])
             del r["_srcs"]
+    print(f"🧾 [SOURCES] total_candidates={len(toutes_les_sources)}")
 
     rapports = [r for r in rapports if not (r.get("agent") == "statistique" and r.get("verdict", "").upper() == "VRAI")]
 
@@ -381,7 +803,12 @@ async def analyze_debate_line(current_json: dict, last_minute_json: dict) -> dic
         final = {"fact_check": None, "contexte": None, "sources_utilisees": []}
 
     summary_parts = [p for p in [final.get("fact_check"), final.get("contexte")] if p]
-    summary_complet = " ".join(summary_parts) if summary_parts else ""
+    summary_complet_fr = " ".join(summary_parts) if summary_parts else ""
+    claim_output_text = atomic_fact_text
+    summary_output_text = summary_complet_fr
+    if output_language == "en":
+        claim_output_text = await _translate_from_french(atomic_fact_text, "en")
+        summary_output_text = await _translate_from_french(summary_complet_fr, "en")
 
     verdict_obs = "unverified" 
     if final.get("fact_check"):
@@ -403,14 +830,14 @@ async def analyze_debate_line(current_json: dict, last_minute_json: dict) -> dic
         # so the payload remains postable for the overlay API contract.
         sources_obs = _normalize_sources(toutes_les_sources)
 
-    should_show_banner = bool(summary_complet and sources_obs)
+    should_show_banner = bool(summary_output_text and sources_obs)
 
     obs_output = {
         "claim": {
-            "text": str(clean_text)
+            "text": str(claim_output_text)
         },
         "analysis": {
-            "summary": summary_complet,
+            "summary": summary_output_text,
             "sources": sources_obs
         },
         "overall_verdict": verdict_obs,

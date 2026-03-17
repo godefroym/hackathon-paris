@@ -6,6 +6,7 @@ VENV_PATH="$ROOT_DIR/ingestion/.venv/bin/activate"
 VIDEO_DELAY_SECONDS="${VIDEO_DELAY_SECONDS:-30}"
 MAX_WAIT_NEXT_PHRASE_SECONDS="${MAX_WAIT_NEXT_PHRASE_SECONDS:-1.0}"
 ANALYSIS_TIMEOUT_SECONDS="${ANALYSIS_TIMEOUT_SECONDS:-30}"
+PIPELINE_LANGUAGE="${PIPELINE_LANGUAGE:-fr}"
 TEE_JSONL_PATH="${TEE_JSONL_PATH:-}"
 
 cd "$ROOT_DIR"
@@ -19,7 +20,7 @@ fi
 source "$VENV_PATH"
 
 if [[ -n "$TEE_JSONL_PATH" ]]; then
-  python texte/realtime_transcript_fusion.py "$@" --providers mistral \
+  python texte/realtime_transcript_fusion.py "$@" --providers mistral --pipeline-language "$PIPELINE_LANGUAGE" \
     | tee "$TEE_JSONL_PATH" \
     | docker compose run --rm -T workflows-launcher \
         python workflows/debate_jsonl_to_temporal.py \
@@ -29,7 +30,7 @@ if [[ -n "$TEE_JSONL_PATH" ]]; then
           --analysis-timeout-seconds "$ANALYSIS_TIMEOUT_SECONDS" \
           --max-wait-next-phrase-seconds "$MAX_WAIT_NEXT_PHRASE_SECONDS"
 else
-  python texte/realtime_transcript_fusion.py "$@" --providers mistral \
+  python texte/realtime_transcript_fusion.py "$@" --providers mistral --pipeline-language "$PIPELINE_LANGUAGE" \
     | docker compose run --rm -T workflows-launcher \
         python workflows/debate_jsonl_to_temporal.py \
           --address temporal:7233 \
