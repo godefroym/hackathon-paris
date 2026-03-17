@@ -52,6 +52,7 @@ from agents.conflict_of_interest_agent import (
 )
 from agents.contradiction_agent import ContradictionAgent, ContradictionResult
 from agents.router import Category, MinitralRouter
+from agents.statistic_agent import StatisticAgent, StatisticResult
 from session_logger import (
     VERDICT_CONFLICT,
     VERDICT_CONTRADICTION,
@@ -86,6 +87,7 @@ def process_claim(
     router: MinitralRouter,
     conflict_agent: ConflictOfInterestAgent,
     contradiction_agent: ContradictionAgent,
+    statistic_agent: StatisticAgent,
     logger: SessionLogger,
     demo_mode: bool = False,
 ) -> None:
@@ -151,16 +153,15 @@ def process_claim(
 
     # ------------------------------------------------------------------
     elif route.category == Category.STATISTIC:
+        result3: StatisticResult = statistic_agent.analyze(claim)
         verdict = VERDICT_UNKNOWN
-        source = "Stats — Web Search / RAG (Simulation)"
-        source_url = "https://www.insee.fr/fr/statistiques/8282302#:~:text=taux%20de%20chômage"
-        details = f"Recherche en cours sur les bases de données publiques... [🔍 Vérifier la source]({source_url})"
+        source = f"{result3.source_name} (Simulation)"
+        details = f"{result3.message} [🔍 Vérifier la source]({result3.source_url})"
         print(_color(
             "  📊 Statistique détectée → agent Web Search / RAG (simulé en mode démo).",
             _CYAN,
         ))
-        print(_color(f"  {details}", _CYAN)) # Print the details for STATISTIC
-        # En production, ici on appellerait le RAG/Web‑Search existant.
+        print(_color(f"  {details}", _CYAN))
 
     # ------------------------------------------------------------------
     else:
@@ -190,6 +191,7 @@ def run(demo_mode: bool = False) -> int:
     router = MinitralRouter()
     conflict_agent = ConflictOfInterestAgent()
     contradiction_agent = ContradictionAgent()
+    statistic_agent = StatisticAgent()
     logger = SessionLogger()
 
     # Lecture de la config de session
@@ -235,6 +237,7 @@ def run(demo_mode: bool = False) -> int:
                 router=router,
                 conflict_agent=conflict_agent,
                 contradiction_agent=contradiction_agent,
+                statistic_agent=statistic_agent,
                 logger=logger,
                 demo_mode=demo_mode,
             )

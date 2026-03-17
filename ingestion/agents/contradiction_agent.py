@@ -3,7 +3,6 @@
 contradiction_agent.py — ContradictionAgent
 ============================================
 Agent "Flip-Flop" : détecte les contradictions.
-Filtre les archives en fonction de l'année de la vidéo (video_year).
 """
 from __future__ import annotations
 
@@ -22,6 +21,7 @@ class ContradictionResult:
     past_quote: str = ""
     alert_message: str = ""
     matched_keywords: list[str] = field(default_factory=list)
+    past_source: str = ""
 
 
 class ContradictionAgent:
@@ -39,7 +39,7 @@ class ContradictionAgent:
         if archives_path:
             self._archives_path = Path(archives_path)
         else:
-            safe_name = self._politician_name.lower().replace(" ", "_")
+            safe_name = self._politician_name.lower().replace(" ", "_").replace("é", "e")
             self._archives_path = self._root_dir / "demo_data" / f"{safe_name}_archives.json"
             if not self._archives_path.exists():
                 self._archives_path = self._root_dir / "demo_data" / "archives_mock.json"
@@ -85,10 +85,11 @@ class ContradictionAgent:
 
             sujet = archive.get("sujet", archive.get("topic", ""))
             
-            # Mots-clés étendus
+            # Mots-clés étendus pour la démo
             keywords = [
                 sujet.lower(), 
                 "retraite", 
+                "49.3",
                 "taxe carbone", 
                 "nucléaire", 
                 "éolien",
@@ -119,6 +120,7 @@ class ContradictionAgent:
                     past_quote=past_quote,
                     alert_message=alert,
                     matched_keywords=matched,
+                    past_source=f"Archives ({past_date})"
                 )
 
         return ContradictionResult(has_contradiction=False, politician=politician_display)

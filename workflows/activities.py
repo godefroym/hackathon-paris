@@ -9,7 +9,7 @@ from typing import Any
 from urllib.parse import urlparse
 import requests
 from temporalio import activity
-from mistralai import Mistral
+from mistralai.client import Mistral
 from dotenv import load_dotenv
 
 # --- ASTUCE POUR LE CHEMIN DES CLÉS ---
@@ -30,7 +30,10 @@ else:
 # Initialisation des clients
 client = Mistral(api_key=os.getenv("MISTRAL_API_KEY"))
 
-SOCIAL_BLACKLIST = ["tiktok.com", "facebook.com", "instagram.com", "x.com", "twitter.com"]
+SOCIAL_BLACKLIST = ["tiktok.com", "facebook.com", "instagram.com", "x.com", "twitter.com", "reddit.com", "pinterest.com"]
+TIER_1 = ["gouv.fr", "insee.fr", "ameli.fr", "vie-publique.fr"]
+TIER_2 = ["actu.fr", "francebleu.fr", "lemonde.fr", "liberation.fr", "rfi.fr", "lepoint.fr", "ladepeche.fr", "france24.com", "franceculture.fr", "20minutes.fr", "ouest-france.fr", "mediapart.fr", "numerama.com", "lefigaro.fr", "franceinfo.fr", "afp.com", "sudouest.fr", "lesechos.fr"]
+
 DEFAULT_FACT_CHECK_POST_URL = "http://localhost:8000/api/stream/fact-check"
 MISTRAL_WEB_SEARCH_MODEL = os.getenv(
     "MISTRAL_WEB_SEARCH_MODEL", "mistral-medium-latest"
@@ -189,6 +192,41 @@ def _is_valid_http_url(url: str) -> bool:
     return stripped.startswith("http://") or stripped.startswith("https://")
 
 
+async def _is_url_alive(url: str) -> bool:
+    if not _is_valid_http_url(url):
+        return False
+    
+    headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"}
+    
+    def _do_ping():
+        import requests
+        try:
+            # On récupère la page pour la lire en texte clair
+            res = requests.get(url, headers=headers, timeout=4, allow_redirects=True)
+            
+            if res.status_code >= 400:
+                return False
+                
+            # Filtre Anti-Redirection vers l'accueil
+            final_url = res.url
+            if urlparse(url).path.strip('/') != '' and urlparse(final_url).path.strip('/') == '':
+                print(f"⚠️ Redirection vers l'accueil bloquée : {url}")
+                return False 
+                
+            # Filtre Anti-Soft 404 (On lit les 3000 premiers caractères)
+            texte_page = res.text[:3000].lower()
+            mots_interdits = ["page introuvable", "erreur 404", "n'existe pas", "not found", "page non trouvée"]
+            
+            if any(mot in texte_page for mot in mots_interdits):
+                print(f"⚠️ Soft-404 bloquée : {url}")
+                return False
+                
+            return True
+        except requests.RequestException:
+            return False
+            
+    return await asyncio.to_thread(_do_ping)
+
 def _domain_to_organization(url: str) -> str:
     try:
         host = urlparse(url).netloc.lower()
@@ -342,7 +380,7 @@ def _collect_candidates_from_any(
             _collect_candidates_from_any(item, collected)
 
 
-def _extract_mistral_web_candidates(response: Any) -> list[dict[str, str]]:
+async def _extract_mistral_web_candidates(response: Any, allow_social: bool = False) -> list[dict[str, str]]:
     payload = response.model_dump() if hasattr(response, "model_dump") else response
     if not isinstance(payload, dict):
         return []
@@ -360,7 +398,8 @@ def _extract_mistral_web_candidates(response: Any) -> list[dict[str, str]]:
             _collect_candidates_from_any(content, candidates)
         elif output_type == "tool.execution":
             _collect_candidates_from_any(output.get("info"), candidates)
-    deduped: list[dict[str, str]] = []
+    
+    candidates_to_check: list[dict[str, str]] = []
     seen: set[str] = set()
     for candidate in candidates:
         url = str(candidate.get("url", "")).strip()
@@ -372,16 +411,31 @@ def _extract_mistral_web_candidates(response: Any) -> list[dict[str, str]]:
             host = ""
         if host.startswith("www."):
             host = host[4:]
-        if any(host == blocked or host.endswith(f".{blocked}") for blocked in SOCIAL_BLACKLIST):
-            continue
+        
+        # Filtrage réseaux sociaux uniquement si allow_social est False
+        if not allow_social:
+            if any(host == blocked or host.endswith(f".{blocked}") for blocked in SOCIAL_BLACKLIST):
+                continue
+        
         seen.add(url)
-        deduped.append(
-            {
-                "url": url,
-                "title": str(candidate.get("title", "")).strip(),
-                "snippet": str(candidate.get("snippet", "")).strip()[:480],
-            }
-        )
+        candidates_to_check.append(candidate)
+
+    # Vérification concurrente de la disponibilité des URLs
+    if not candidates_to_check:
+        return []
+        
+    aliveness = await asyncio.gather(*[_is_url_alive(c["url"]) for c in candidates_to_check])
+    
+    deduped: list[dict[str, str]] = []
+    for candidate, is_alive in zip(candidates_to_check, aliveness):
+        if is_alive:
+            deduped.append(
+                {
+                    "url": candidate["url"],
+                    "title": str(candidate.get("title", "")).strip(),
+                    "snippet": str(candidate.get("snippet", "")).strip()[:480],
+                }
+            )
     return deduped
 
 
@@ -393,10 +447,13 @@ async def _search_relevant_sources(
     search_depth: str = "basic",
     max_results: int = 6,
     exclude_domains: list[str] | None = None,
+    allow_social: bool = False,
 ) -> list[dict[str, str]]:
     del search_depth  # Conservé pour compatibilité d'interface.
     excluded = set(exclude_domains or [])
-    excluded.update(SOCIAL_BLACKLIST)
+    if not allow_social:
+        excluded.update(SOCIAL_BLACKLIST)
+        
     web_query = (
         f"{query}\n\n"
         f"Affirmation: {assertion}\n"
@@ -405,10 +462,26 @@ async def _search_relevant_sources(
     )
     try:
         response = await _mistral_web_search_response(web_query)
-        raw_candidates = _extract_mistral_web_candidates(response)
+        raw_candidates = await _extract_mistral_web_candidates(response, allow_social=allow_social)
     except Exception as exc:
         print(f"❌ Erreur Mistral Web Search: {exc}")
         raw_candidates = []
+
+    # Priorisation par Tiers
+    def _get_tier(url: str) -> int:
+        try:
+            host = urlparse(url).netloc.lower()
+        except Exception:
+            return 3
+        if host.startswith("www."):
+            host = host[4:]
+        if any(host == t or host.endswith(f".{t}") for t in TIER_1):
+            return 1
+        if any(host == t or host.endswith(f".{t}") for t in TIER_2):
+            return 2
+        return 3
+
+    raw_candidates.sort(key=lambda c: _get_tier(c["url"]))
 
     filtered_candidates: list[dict[str, str]] = []
     for item in raw_candidates:
@@ -456,6 +529,7 @@ Règles:
 1. Garde uniquement les sources qui répondent directement à l'affirmation/question.
 2. Rejette les sources hors-sujet (ex: mauvaise ville/pays/contexte).
 3. Si aucune source n'est pertinente, renvoie une liste vide.
+4. FAVORISE systématiquement les sources gouvernementales (TIER 1) et les médias de référence (TIER 2).
 
 JSON strict:
 {{
@@ -645,14 +719,16 @@ def _enrich_editor_result_with_sources(
     return enriched
 
 # --- AGENT 1 : STATISTIQUES (MODE INVESTIGATION LIBRE) ---
+# --- AGENT 1 : STATISTIQUES (MODE INVESTIGATION LIBRE) ---
 async def agent_statistique(data):
     print(f"📊 [Agent Stat] Investigation approfondie en cours...")
     
+    # NOUVELLE RECHERCHE SIMPLIFIÉE
     query_complete = (
-        f"{data['affirmation']} {data.get('question_posee', '')} "
-        "(site:gouv.fr OR site:insee.fr OR site:vie-publique.fr OR site:afp.com "
-        "OR site:lemonde.fr OR site:lefigaro.fr)"
+        f"vérification fact-checking statistiques france {data['affirmation']} "
+        f"{data.get('question_posee', '')}"
     )
+    
     selected_sources = await _search_relevant_sources(
         assertion=data.get("affirmation", ""),
         question=data.get("question_posee", ""),
@@ -660,7 +736,11 @@ async def agent_statistique(data):
         search_depth="basic",
         max_results=8,
         exclude_domains=SOCIAL_BLACKLIST,
+        allow_social=False,
     )
+    # ---- AJOUTE CETTE LIGNE ICI ----
+    print(f"🚨 DEBUG - LIENS SURVIVANTS APRÈS LE FILTRE : {[s['url'] for s in selected_sources]}")
+    # --------------------------------
     if not selected_sources:
         return {
             "agent": "statistique",
@@ -715,7 +795,8 @@ async def agent_coherence_personnelle(data):
         query=query,
         search_depth="advanced",
         max_results=8,
-        exclude_domains=SOCIAL_BLACKLIST,
+        exclude_domains=None,
+        allow_social=True,
     )
     if not selected_sources:
         return {
@@ -742,13 +823,16 @@ async def agent_coherence_personnelle(data):
     return _sanitize_primary_source(raw_result=raw, sources=selected_sources)
 
 # --- AGENT 4 : CONTEXTE (MODE INVESTIGATION LIBRE) ---
+# --- AGENT 4 : CONTEXTE (MODE INVESTIGATION LIBRE) ---
 async def agent_contexte(data):
     print(f"📚 [Agent Contexte] Analyse factuelle détaillée...")
     
+    # NOUVELLE RECHERCHE SIMPLIFIÉE
     query_complete = (
-        f"{data['affirmation']} {data.get('question_posee', '')} "
-        "contexte faits historiques France 2024 2025 2026"
+        f"contexte explication fact-checking france {data['affirmation']} "
+        f"{data.get('question_posee', '')}"
     )
+    
     selected_sources = await _search_relevant_sources(
         assertion=data.get("affirmation", ""),
         question=data.get("question_posee", ""),
@@ -756,6 +840,7 @@ async def agent_contexte(data):
         search_depth="basic",
         max_results=8,
         exclude_domains=SOCIAL_BLACKLIST,
+        allow_social=False,
     )
     if not selected_sources:
         return {

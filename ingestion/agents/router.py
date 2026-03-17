@@ -77,6 +77,7 @@ _STATISTIC_PATTERNS: list[str] = [
     r"\baugmentation\b",
     r"\bdiminution\b",
     r"\bemplois?\b",
+    r"\bpouvoir d'achat\b",
 ]
 
 # Fort signal individuel → poids 2.0 chacun
@@ -94,15 +95,18 @@ _POLICY_STANCE_STRONG_PATTERNS: list[str] = [
     r"\bferme(ment)? oppos[eé]\b",
     r"\bje ne veux pas\b",
     r"\bje veux\b",
-    r"\bje propose\b",
     r"\bretraites?\b",
     r"\b\d{2} ans\b",  # Pour "62 ans", "65 ans"
+    r"49\.3",
+    r"l'article 49\.3",
+    r"\bengagement solennel\b",
 ]
 
 # Signal générique → poids 0.5 chacun (ne doit pas écraser un topic fort)
 _POLICY_STANCE_WEAK_PATTERNS: list[str] = [
     r"\bnous devons\b",
     r"\bil faut (absolument|imp[eé]rativement)?\b",
+    r"\bje propose\b",
 ]
 
 _TOPIC_MENTION_PATTERNS: list[str] = [
@@ -124,6 +128,8 @@ _TOPIC_MENTION_PATTERNS: list[str] = [
     r"\bcliniques?\b",
     r"\bpriv[eé]es?\b",
     r"\bSant[eé]Plus\b",
+    r"\b[ée]oliennes? offshore\b",
+    r"\bVentOcean\b",
 ]
 
 
