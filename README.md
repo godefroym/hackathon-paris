@@ -1,200 +1,329 @@
-🛡️ Vériscope - Hackathon Mistral AI 2026
-1. Description du Problème
-Dans le tumulte des campagnes électorales, le fact-checking traditionnel souffre d'un défaut majeur : l'asynchronisme. Une affirmation fausse est prononcée en direct, devient virale en quelques minutes, tandis que le démenti n'arrive que le lendemain.
+# Veriscope - Realtime Fact-Checking for Live Debates
 
-Le citoyen est exposé à trois types de distorsions :
+Veriscope is a real-time pipeline that:
 
-La distorsion statistique : Manipulation de chiffres complexes (PIB, chômage) difficiles à vérifier instantanément.
+1. captures live speech from a microphone,
+2. transcribes complete phrases continuously,
+3. launches one Temporal workflow per phrase,
+4. runs fact-check analysis,
+5. posts validated results to the app API,
+6. broadcasts overlay updates for OBS.
 
-La distorsion rhétorique (Esquive) : La "langue de bois" où le candidat évite de répondre à une question précise.
+The project is designed for political-debate streams with a configurable video delay (default: 30s).
 
-La distorsion de cohérence : Des retournements de veste rapides (moins de 6 mois) qui passent inaperçus dans le flux d'informations.
+## What is in this repository
 
-Le manque de contexte 
+This repo contains 3 connected subsystems:
 
-Vériscope résout ce problème en proposant une "War Room" citoyenne capable d'analyser, de sourcer et de contextualiser le discours politique avec une latence inférieure à 10 secondes.
+- `texte/` and `ingestion/`: realtime speech-to-text and JSON emission.
+- `workflows/`: Temporal launcher, workflow, worker, activities (analysis + POST).
+- `app/`: Laravel API + broadcast overlay page (`/overlays/fact-check`) + OBS scene switching.
 
-2. L'Architecture Technique (Stack Mistral)
-Transcription (STT) : Voxtral-realtime-latest (Mistral AI).
+## End-to-end data flow
 
-Raisonnement & Analyse : Mistral-Small-latest (Router) & Mistral-Large-latest (Expert).
+```mermaid
+flowchart LR
+  Mic["Virtual/Physical Mic"] --> STT["Realtime STT (Mistral)"]
+  STT --> JSONL["JSONL transcript lines"]
+  JSONL --> Launcher["workflows/debate_jsonl_to_temporal.py"]
+  Launcher --> Temporal["Temporal Workflow per line"]
+  Temporal --> Activity["analyze_debate_line + correction check"]
+  Activity --> Post["POST /api/stream/fact-check"]
+  Post --> App["Laravel app-web"]
+  App --> Reverb["Broadcast stream.fact-check"]
+  Reverb --> Overlay["/overlays/fact-check in OBS Browser Source"]
+```
 
-Monitoring : Weights & Biases (Weave) pour le tracking des prompts.
+## Current behavior (important)
 
-Données Externes : API Google Search (Filtrée sur sources institutionnelles).
+- The fusion launcher is now **Mistral-only** for stability.
+- ElevenLabs scripts still exist, but `run_fusion_to_temporal.sh` forces `--providers mistral`.
+- One workflow is started per transcript line.
+- Delay is computed from the estimated phrase start (`metadata.timestamp_start`) to align display with delayed video.
 
-Interface : Dashboard temps réel (React ou Streamlit).
+## Directory map
 
-3. Connexion des Tâches (Le Protocole d'Échange)
-Pour que vous ne vous bloquiez pas mutuellement, vous allez fonctionner avec un système de Producteur/Consommateur basé sur un fichier JSON partagé ou une file d'attente (Queue).
+- `README.md`: this file (global runbook).
+- `docker-compose.yml`: full stack (Temporal + app + worker + reverb + queue + mediamtx).
+- `scripts/run_stack.sh`: stack helper (`up/down/restart/ps/logs`).
+- `cle.env.example`: env template for workflows.
+- `texte/realtime_transcript_fusion.py`: realtime STT JSON emitter (Mistral stream).
+- `texte/run_fusion_to_temporal.sh`: one-command STT -> Temporal launcher.
+- `workflows/debate_jsonl_to_temporal.py`: reads JSONL, computes delay, starts workflows.
+- `workflows/debate_workflow.py`: Temporal workflow orchestration.
+- `workflows/activities.py`: fact-check analysis + POST to app API.
+- `app/routes/api.php`: `POST /api/stream/fact-check`.
+- `app/routes/web.php`: overlay page route.
 
-🛠️ Rôle 1 : Numéricien 1 (Le Pipe Audio)
-Mission : Transformer le son en texte brut.
+## Prerequisites
 
-Entrée : Flux audio YouTube.
+- Docker Desktop (with `docker compose`).
+- Python 3.11+ (local venv for transcription scripts).
+- A working input microphone (physical or virtual).
+- API key in `cle.env`.
 
-Action : Envoie des chunks audio à Voxtral.
+## 1) Initial setup
 
-Connexion : Il écrit le résultat dans un objet Python (ou un fichier stream_text.json) sous cette forme :
+### 1.1 Clone and install Python dependencies
 
-JSON
-{ "timestamp": "12:05", "raw_text": "Le chômage a baissé de 2%." }
+```bash
+cd /path/to/workspace
+git clone https://github.com/Barbapapazes/hackathon-paris.git
+cd hackathon-paris
 
-🧠 Rôle 2 : Numéricienne 2 (Le Cerveau - Toi)
-Mission : Transformer le texte brut en analyse structurée.
+cd ingestion
+python3 -m venv .venv
+source .venv/bin/activate
+pip install -r requirements.txt
+pip install -r ../texte/requirements.txt
+cd ..
+```
 
-Entrée : Lit le raw_text de Numéricien 1.
+### 1.2 Configure environment
 
-Action :
+```bash
+cp cle.env.example cle.env
+```
 
-Route via Mistral Small.
+Fill at least:
 
-Si Statistique : Lance la recherche Google + Analyse Mistral Large.
+```bash
+MISTRAL_API_KEY=...
+FACT_CHECK_POST_URL=http://app-web:8000/api/stream/fact-check
+VIDEO_STREAM_DELAY_SECONDS=30
+FACT_CHECK_ANALYSIS_TIMEOUT_SECONDS=30
+```
 
-Si Esquive/Contexte : Analyse directe Mistral Large.
+Notes:
 
-Connexion : Elle produit le JSON final (Le Contrat) et l'envoie au Dev Web.
+- `FACT_CHECK_POST_URL` should target `app-web` inside Docker network.
+- `cle.env` is auto-loaded by worker and transcript scripts.
 
-💻 Rôle 3 : Dev Web (L'Interface)
-Mission : Rendre l'analyse lisible et immédiate.
+## 2) Start the full stack
 
-Entrée : Lit le JSON final produit par Numéricienne 2.
+### Option A (recommended)
 
-Action : Met à jour la Timeline en injectant la nouvelle carte avec le bon code couleur (Vert/Orange/Rouge).
+```bash
+./scripts/run_stack.sh up --build
+```
 
-Connexion : Il travaille en autonomie avec un fichier mock_data.json jusqu'à ce que les numériciens branchent le flux réel.
+### Option B (raw compose)
 
-4. Le Contrat de Données (L'Interface Commune)
-C'est le point de rencontre obligatoire de vos trois codes.
+```bash
+docker compose up -d --build
+```
 
-JSON
+### Health checks
+
+```bash
+docker compose ps
+./scripts/run_stack.sh logs workflows-worker
+```
+
+Expected services:
+
+- `temporal` on `7233`
+- `temporal-ui` on `8080`
+- `app-web` on `8000`
+- `app-reverb` on `8081`
+- `app-queue`
+- `workflows-worker`
+
+## 3) Find microphone index
+
+```bash
+source ingestion/.venv/bin/activate
+python texte/realtime_transcript_fusion.py --list-devices
+```
+
+Example output:
+
+- `index: 1, name: WOODBRASS UM3`
+- `index: 2, name: Microphone MacBook Air`
+
+Use `--input-device-index` with the selected index.
+
+## 4) Run realtime transcription -> Temporal -> fact-check
+
+```bash
+cd /Users/godefroy.meynard/Documents/test_datagouv_mcp/hackaton_audio/hackathon-paris
+source ingestion/.venv/bin/activate
+
+VIDEO_DELAY_SECONDS=30 MAX_WAIT_NEXT_PHRASE_SECONDS=0.5 ANALYSIS_TIMEOUT_SECONDS=20 \
+./texte/run_fusion_to_temporal.sh \
+  --input-device-index 1 \
+  --personne "Valérie Pécresse" \
+  --source-video "TF1 20h" \
+  --question-posee "" \
+  --show-decisions
+```
+
+What this does:
+
+- emits transcript JSON lines,
+- starts Temporal workflows continuously,
+- waits dynamic delay to match video stream,
+- posts postable fact-check payloads to `/api/stream/fact-check`.
+
+## 5) Validate in Temporal UI
+
+Open: `http://localhost:8080`
+
+For each workflow:
+
+1. open workflow execution,
+2. inspect `WorkflowExecutionCompleted` result,
+3. check:
+   - `analysis_result.afficher_bandeau`
+   - `post_result.posted`
+   - `post_result.status_code`
+   - `timing_debug.measured_delay_from_start_seconds`
+   - `timing_debug.delay_error_seconds`
+
+Interpretation:
+
+- `afficher_bandeau=false` => workflow intentionally skipped posting.
+- `analysis_not_postable` => no valid overlay payload built.
+- `posted=true` + `200` => API accepted and broadcast path should trigger.
+
+## 6) Validate overlay/API side
+
+### 6.1 API endpoint
+
+- Endpoint: `POST http://localhost:8000/api/stream/fact-check`
+- Route file: `app/routes/api.php`
+
+### 6.2 Overlay page for OBS
+
+- Overlay URL: `http://localhost:8000/overlays/fact-check`
+- Route file: `app/routes/web.php`
+
+### 6.3 Useful logs
+
+```bash
+docker compose logs -f app-web app-queue app-reverb workflows-worker
+```
+
+Look for:
+
+- `app-web`: `/api/stream/fact-check` hits,
+- `app-queue`: `VerifyFactCheckSceneTimestampJob` running,
+- `workflows-worker`: analysis activity and post results.
+
+## Transcript JSON contract
+
+Each emitted line follows:
+
+```json
 {
-  "id": "uuid",
-  "timestamp": "HH:MM:SS",
-  "category": "STAT | ESQUIVE | CONTEXT | CONTRADICTION",
-  "raw_input": "La phrase du politique",
-  "analysis": {
-    "verdict": "green | orange | red | blue",
-    "title": "Titre court",
-    "explanation": "Explication pédagogique de Mistral Large",
-    "source_url": "Lien vers la preuve",
-    "confidence_score": 0.95
+  "personne": "Valérie Pécresse",
+  "question_posee": "",
+  "affirmation": "Last N committed phrases",
+  "affirmation_courante": "Current complete phrase",
+  "metadata": {
+    "source_video": "TF1 20h",
+    "timestamp_elapsed": "00:24",
+    "timestamp_start": "2026-03-01T13:37:11.031Z",
+    "timestamp_end": "2026-03-01T13:37:15.599Z",
+    "timestamp": "2026-03-01T13:37:15.599Z"
   }
 }
-5. Timeline du Sprint
-Samedi 13h-15h : Stabilisation des pipelines individuels (STT pour N1, Prompts pour N2, UI pour Web).
+```
 
-Samedi 15h-19h : Développement des modules d'analyse (Stats et Esquive).
+`timestamp_start` is used for delay alignment.
 
-Samedi 19h-23h : Premier "Frankenstein" (Connexion des 3 rôles).
+## Workflow input contract
 
-Dimanche 08h-11h : Débogage final et Code Freeze.
+Each Temporal run receives:
 
-Dimanche 11h-15h : Enregistrement démo et Pitch.
+- `current_json`: current transcript line.
+- `last_minute_json`: aggregate context for last 60s.
+- `post_delay_seconds`: computed remaining delay before post.
+- `analysis_timeout_seconds`.
+- `next_json`: next phrase payload when available.
 
-Conseil pour la connexion :
-Utilisez un dossier partagé sur un GitHub commun.
+## Runtime knobs
 
-Numéricien 1 travaille dans ingestion/.
+You can tune behavior at launch time:
 
-Numéricienne 2 travaille dans analysis/.
+- `VIDEO_DELAY_SECONDS` (default 30)
+- `MAX_WAIT_NEXT_PHRASE_SECONDS` (default 1.0)
+- `ANALYSIS_TIMEOUT_SECONDS` (default 30)
 
-Dev Web travaille dans frontend/.
+And in `cle.env`:
 
-# Structure 
+- `VIDEO_STREAM_DELAY_SECONDS`
+- `FACT_CHECK_ANALYSIS_TIMEOUT_SECONDS`
+- `MISTRAL_WEB_SEARCH_MODEL`
+- `SOURCE_SELECTION_MODE`
+- rate-limit backoff settings.
 
-Blocs concernés : Virtual mic ➔ (Nouveau sous-système de buffer)
+## Troubleshooting
 
-Le rôle : Capturer le son sans interruption et préparer les blocs superposés.
+### 1) `ModuleNotFoundError: mistralai`
 
-Entrée : Flux audio brut (ex: PCM, 16kHz) en continu depuis la vidéo/le micro.
+You are not in the venv or dependencies are missing.
 
-Sortie : Un fichier temporaire ou un buffer en mémoire contenant exactement les 20 dernières secondes d'audio, généré strictement toutes les 10 secondes.
+```bash
+cd ingestion
+python3 -m venv .venv
+source .venv/bin/activate
+pip install -r requirements.txt
+pip install -r ../texte/requirements.txt
+```
 
-Comment l'implémenter : * Utilisez un script Python asynchrone avec une structure de données collections.deque (taille fixe correspondant à 20s d'échantillons).
+### 2) `zsh: command not found: temporal`
 
-L'audio entre en continu d'un côté. Toutes les 10 secondes, une tâche asyncio "photographie" l'état actuel du deque et l'envoie au bloc suivant.
+Use Docker stack (`scripts/run_stack.sh`) instead of local Temporal binary.
 
-2. Transcription Vocale (STT)
-Blocs concernés : STT ➔ Voxtral Realtime
+### 3) Worker restart loop: `Namespace default is not found`
 
-Le rôle : Transformer le bloc audio de 20s en texte.
+Ensure `temporal-create-namespace` completed successfully. Restart full stack:
 
-Entrée : Le chunk audio de 20 secondes.
+```bash
+./scripts/run_stack.sh restart --build
+```
 
-Sortie : Une chaîne de caractères (String) brute. Attention : à cause de la fenêtre glissante, la première moitié de ce texte sera quasiment identique à la seconde moitié du texte généré 10 secondes plus tôt.
+### 4) `OSError: [Errno 48] Address already in use`
 
-Outils recommandés : Voxtral (si disponible via Mistral), ou des API ultra-rapides comme Groq (Whisper) ou Deepgram pour minimiser la latence.
+Port is already used (often 8000). Stop conflicting process or use another port.
 
-3. Triage, Extraction et "Semantic Cache" (Le Filtre Anti-Doublon)
-Bloc concerné : Minitral (classification)
+### 5) Mistral realtime crash (`EngineDeadError`)
 
-Le rôle : Extraire les affirmations pertinentes et, surtout, bloquer les doublons créés par le chevauchement audio pour ne pas spammer OBS.
+The transcript script now includes auto-reconnect logic. If persistent, relaunch script and check API key/network.
 
-Entrée : La chaîne de caractères brute de 20s.
+### 6) No overlay in OBS
 
-Sortie : Un objet JSON strict contenant uniquement les nouvelles affirmations vérifiables.
+Check order:
 
-JSON
-{
-  "nouvelles_affirmations": [
-    {"id": "aff_12", "texte": "Le chômage a baissé de 10% depuis mon élection."}
-  ]
-}
-Outils recommandés : Modèle rapide (ex: ministral-8b) en mode JSON.
+1. workflow actually posts (`post_result.posted=true`),
+2. app receives `/api/stream/fact-check`,
+3. OBS Browser Source points to `http://localhost:8000/overlays/fact-check`,
+4. OBS websocket scene names match app config.
 
-Comment l'implémenter :
+### 7) Why no POST even when transcription works
 
-Prompt : Demandez au modèle d'extraire sous forme de liste les affirmations factuelles.
+Because workflow can intentionally skip when:
 
-Le Cache (Code Python) : Stockez en mémoire les affirmations des 60 dernières secondes. Quand Minitral sort une liste d'affirmations pour le bloc actuel, comparez-les rapidement au cache (avec une fonction de similarité textuelle comme TF-IDF ou un calcul de distance de Levenshtein très basique). Si l'affirmation a déjà été analysée il y a 10 secondes, elle est supprimée de la liste. Seules les nouvelles affirmations passent à l'étape suivante.
+- `afficher_bandeau=false`,
+- missing sources,
+- next phrase detected as self-correction.
 
-4. Les 3 Agents d'Analyse (Exécution Parallèle)
-Blocs concernés : Statistique, Distorsion rhétorique, Cohérence + Tools (web search, mcp, rag)
+## Development workflow
 
-Le rôle : Vérifier l'affirmation sous trois angles différents simultanément.
+```bash
+git checkout -b codex/<feature>
+# edit
+python3 -m py_compile workflows/*.py texte/*.py
+bash -n texte/*.sh scripts/*.sh
+git add <files>
+git commit -m "feat: ..."
+git push origin codex/<feature>
+```
 
-Entrée : L'objet JSON de la nouvelle affirmation extraite.
+## Additional docs
 
-Sortie : 3 rapports distincts au format JSON.
+- `workflows/README.md`: Temporal-specific details.
+- `texte/README.md`: STT scripts and options.
+- `app/README.md`: API payload examples.
 
-JSON
-{
-  "agent": "distorsion_rhetorique",
-  "verdict": "trompeur",
-  "type": "homme_de_paille",
-  "explication": "Le locuteur invente un argument que son adversaire n'a jamais prononcé pour le discréditer."
-}
-Outils recommandés : * Agent 1 (Stats) : mistral-small + Tool Web Search (ex: Tavily).
-
-Agent 2 (Rhétorique) : mistral-large (nécessite beaucoup de finesse de raisonnement, pas d'outil externe nécessaire).
-
-Agent 3 (Cohérence) : mistral-small + MCP connecté à une base vectorielle (RAG) contenant les archives du candidat.
-
-Comment l'implémenter : Utilisez impérativement asyncio.gather() en Python. Les trois appels d'API vers Mistral doivent partir à la milliseconde près en même temps.
-
-5. Agrégation et Action TV (Tool Calling OBS)
-Blocs concernés : Mistral 3 (agrégation) ➔ Tools (changement de scène) ➔ OBS
-
-Le rôle : Prendre une décision finale et l'afficher à l'écran en direct.
-
-Entrée : Une liste regroupant les 3 JSON générés par les agents parallèles.
-
-Sortie : L'exécution d'un appel de fonction (Tool Calling) qui déclenche une requête WebSocket.
-
-Outils recommandés : mistral-large-latest avec Function Calling, et la librairie Python obs-websocket-py.
-
-Comment l'implémenter :
-
-Mistral reçoit un prompt système lui demandant de faire la synthèse des 3 agents. S'il y a un consensus sur le fait que la phrase est fausse/trompeuse, le modèle déclenche l'outil fourni : update_obs_alert(verdict_type, short_summary, source).
-
-Votre script Python intercepte cet appel de fonction et envoie une commande WebSocket à OBS pour rendre visible un groupe d'éléments (un calque texte avec le résumé + un fond de couleur) pendant 5 à 10 secondes, avant de le masquer à nouveau.
-
-## Intégration en cours (transcript + Temporal)
-
-- Transcription realtime: `ingestion/realtime_transcript.py`
-- Workflow no-op 30s par ligne JSON: `workflows/debate_workflow.py`
-- Worker Temporal associé: `workflows/debate_worker.py`
-- Envoi JSONL vers Temporal: `workflows/debate_jsonl_to_temporal.py`
-
-Voir `ingestion/README.md` et `workflows/README.md` pour le runbook.

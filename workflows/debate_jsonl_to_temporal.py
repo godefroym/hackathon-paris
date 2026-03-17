@@ -69,8 +69,8 @@ def parse_args() -> argparse.Namespace:
         type=float,
         default=video_delay_default,
         help=(
-            "Delai video cible (sec). Le delai poste par ligne est calcule avec "
-            "video_delay - (timestamp_current - timestamp_previous)."
+            "Delai video cible (sec). Le launcher calcule un timestamp cible absolu "
+            "par phrase (debut estime + video_delay), puis deduit le delai restant."
         ),
     )
     parser.add_argument(
@@ -91,10 +91,10 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--max-wait-next-phrase-seconds",
         type=float,
-        default=4.0,
+        default=1.0,
         help=(
             "En stdin, attente max de la phrase suivante avant envoi de la phrase "
-            "en attente sans next_json (default: 4.0)."
+            "en attente sans next_json (default: 1.0)."
         ),
     )
     parser.add_argument(
@@ -117,35 +117,56 @@ def format_utc_iso_millis(dt: datetime) -> str:
     )
 
 
-def parse_payload_timestamp(payload: dict[str, Any]) -> datetime:
+def parse_timestamp_value(raw: Any, *, allow_elapsed_fallback: bool) -> datetime | None:
+    if not isinstance(raw, str):
+        return None
+    normalized = raw.strip()
+    if not normalized:
+        return None
+    try:
+        parsed = datetime.fromisoformat(normalized.replace("Z", "+00:00"))
+        if parsed.tzinfo is None:
+            return parsed.replace(tzinfo=timezone.utc)
+        return parsed.astimezone(timezone.utc)
+    except ValueError:
+        if not allow_elapsed_fallback:
+            return None
+    # Backward compatibility with elapsed timestamps from old payloads.
+    for fmt in ("%H:%M:%S.%f", "%H:%M:%S", "%M:%S.%f", "%M:%S"):
+        try:
+            parsed_time = datetime.strptime(normalized, fmt)
+            now = datetime.now(timezone.utc)
+            hour = parsed_time.hour if "%H" in fmt else 0
+            return now.replace(
+                hour=hour,
+                minute=parsed_time.minute,
+                second=parsed_time.second,
+                microsecond=parsed_time.microsecond,
+            )
+        except ValueError:
+            continue
+    return None
+
+
+def parse_payload_timestamps(
+    payload: dict[str, Any],
+) -> tuple[datetime | None, datetime | None]:
     metadata = payload.get("metadata")
+    start_timestamp: datetime | None = None
+    end_timestamp: datetime | None = None
     if isinstance(metadata, dict):
-        raw = metadata.get("timestamp")
-        if isinstance(raw, str):
-            normalized = raw.strip()
-            if normalized:
-                try:
-                    parsed = datetime.fromisoformat(normalized.replace("Z", "+00:00"))
-                    if parsed.tzinfo is None:
-                        return parsed.replace(tzinfo=timezone.utc)
-                    return parsed.astimezone(timezone.utc)
-                except ValueError:
-                    pass
-                # Backward compatibility with elapsed timestamps from old payloads.
-                for fmt in ("%H:%M:%S.%f", "%H:%M:%S", "%M:%S.%f", "%M:%S"):
-                    try:
-                        parsed_time = datetime.strptime(normalized, fmt)
-                        now = datetime.now(timezone.utc)
-                        hour = parsed_time.hour if "%H" in fmt else 0
-                        return now.replace(
-                            hour=hour,
-                            minute=parsed_time.minute,
-                            second=parsed_time.second,
-                            microsecond=parsed_time.microsecond,
-                        )
-                    except ValueError:
-                        continue
-    return datetime.now(timezone.utc)
+        start_timestamp = parse_timestamp_value(
+            metadata.get("timestamp_start"),
+            allow_elapsed_fallback=False,
+        )
+        end_raw = metadata.get("timestamp_end")
+        if end_raw is None:
+            end_raw = metadata.get("timestamp")
+        end_timestamp = parse_timestamp_value(
+            end_raw,
+            allow_elapsed_fallback=True,
+        )
+    return start_timestamp, end_timestamp
 
 
 def extract_phrase(payload: dict[str, Any]) -> str:
@@ -216,15 +237,25 @@ async def run() -> int:
     submitted = 0
     recent_payloads: deque[tuple[datetime, dict[str, Any]]] = deque()
     pending_item: dict[str, Any] | None = None
+    last_payload_end_timestamp: datetime | None = None
 
     async def submit_item(
         *,
         item: dict[str, Any],
         next_payload: dict[str, Any] | None,
-        gap_seconds: float,
     ) -> None:
         nonlocal submitted
-        computed_post_delay_seconds = max(0.0, video_delay_seconds - max(0.0, gap_seconds))
+        now_utc = datetime.now(timezone.utc)
+        estimated_start_timestamp = item["estimated_start_timestamp"]
+        target_post_timestamp = estimated_start_timestamp + timedelta(
+            seconds=video_delay_seconds
+        )
+        computed_post_delay_seconds = max(
+            0.0, (target_post_timestamp - now_utc).total_seconds()
+        )
+        lateness_seconds = max(
+            0.0, (now_utc - target_post_timestamp).total_seconds()
+        )
         submitted += 1
         workflow_id = build_workflow_id(args.workflow_id_prefix, submitted)
         await client.start_workflow(
@@ -243,8 +274,15 @@ async def run() -> int:
         print(
             "[jsonl-to-temporal] submitted "
             f"workflow_id={workflow_id} "
-            f"gap_seconds={gap_seconds:.3f} "
+            f"payload_start_timestamp={format_utc_iso_millis(item['payload_start_timestamp']) if item['payload_start_timestamp'] else 'n/a'} "
+            f"payload_end_timestamp={format_utc_iso_millis(item['payload_end_timestamp']) if item['payload_end_timestamp'] else 'n/a'} "
+            f"payload_window_timestamp={format_utc_iso_millis(item['payload_timestamp'])} "
+            f"estimated_start_timestamp={format_utc_iso_millis(estimated_start_timestamp)} "
+            f"estimated_start_source={item['estimated_start_source']} "
+            f"target_post_timestamp={format_utc_iso_millis(target_post_timestamp)} "
+            f"submit_timestamp={format_utc_iso_millis(now_utc)} "
             f"computed_post_delay_seconds={computed_post_delay_seconds:.3f} "
+            f"lateness_seconds={lateness_seconds:.3f} "
             f"analysis_timeout_seconds={analysis_timeout_seconds} "
             f"last_minute_phrases={item['last_minute_json']['metadata']['phrases_count']} "
             f"has_next_phrase={bool(next_phrase)}",
@@ -252,7 +290,7 @@ async def run() -> int:
         )
 
     async def process_raw_line(raw: str, line_number: int) -> None:
-        nonlocal invalid_lines, pending_item
+        nonlocal invalid_lines, pending_item, last_payload_end_timestamp
         try:
             payload = json.loads(raw)
         except json.JSONDecodeError as exc:
@@ -268,16 +306,27 @@ async def run() -> int:
         if not isinstance(payload, dict):
             payload = {"payload": payload}
 
-        payload_timestamp = parse_payload_timestamp(payload)
+        payload_start_timestamp, payload_end_timestamp = parse_payload_timestamps(payload)
+        if payload_start_timestamp is not None:
+            estimated_start_timestamp = payload_start_timestamp
+            estimated_start_source = "metadata.timestamp_start"
+        elif last_payload_end_timestamp is not None:
+            estimated_start_timestamp = last_payload_end_timestamp
+            estimated_start_source = "previous_payload_end"
+        elif payload_end_timestamp is not None:
+            estimated_start_timestamp = payload_end_timestamp
+            estimated_start_source = "metadata.timestamp"
+        else:
+            estimated_start_timestamp = datetime.now(timezone.utc)
+            estimated_start_source = "now_fallback"
+
+        payload_timestamp = (
+            payload_end_timestamp or payload_start_timestamp or estimated_start_timestamp
+        )
         if pending_item is not None:
-            gap_seconds = max(
-                0.0,
-                (payload_timestamp - pending_item["payload_timestamp"]).total_seconds(),
-            )
             await submit_item(
                 item=pending_item,
                 next_payload=payload,
-                gap_seconds=gap_seconds,
             )
 
         recent_payloads.append((payload_timestamp, payload))
@@ -293,8 +342,13 @@ async def run() -> int:
         pending_item = {
             "payload": payload,
             "payload_timestamp": payload_timestamp,
+            "payload_start_timestamp": payload_start_timestamp,
+            "payload_end_timestamp": payload_end_timestamp,
+            "estimated_start_timestamp": estimated_start_timestamp,
+            "estimated_start_source": estimated_start_source,
             "last_minute_json": last_minute_json,
         }
+        last_payload_end_timestamp = payload_end_timestamp or payload_timestamp
 
     try:
         if args.input_jsonl == "-":
@@ -307,7 +361,6 @@ async def run() -> int:
                         await submit_item(
                             item=pending_item,
                             next_payload=None,
-                            gap_seconds=0.0,
                         )
                         pending_item = None
                     continue
@@ -332,7 +385,6 @@ async def run() -> int:
             await submit_item(
                 item=pending_item,
                 next_payload=None,
-                gap_seconds=0.0,
             )
     finally:
         if should_close:

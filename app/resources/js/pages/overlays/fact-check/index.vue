@@ -43,6 +43,28 @@ const showFactCheck = computed(() => hasReceivedPayload.value && hasFactCheck.va
 
 const ui = computed(() => index({ hasFactCheck: showFactCheck.value }))
 
+async function hydrateLatestPayload(): Promise<void> {
+  try {
+    const response = await fetch('/api/stream/fact-check/latest', {
+      method: 'GET',
+      headers: { Accept: 'application/json' },
+      cache: 'no-store',
+    })
+    if (!response.ok) {
+      return
+    }
+    const event = (await response.json()) as FactCheckEventPayload
+    payload.value = normalizeFactCheckPayload(event)
+    hasReceivedPayload.value = true
+  } catch {
+    // Ignore bootstrap errors and rely on realtime events.
+  }
+}
+
+onMounted(() => {
+  void hydrateLatestPayload()
+})
+
 useEchoPublic<FactCheckEventPayload>(
   'stream.fact-check',
   '.stream.fact-check.content-updated',

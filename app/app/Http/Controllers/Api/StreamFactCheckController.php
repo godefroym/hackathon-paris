@@ -23,6 +23,14 @@ class StreamFactCheckController extends Controller
         $obsSceneSwitcher->switchToScene($scene);
 
         $this->cache()->put($this->lastSwitchAtCacheKey(), $switchedAtMs, now()->addMinutes(10));
+        $this->cache()->put($this->lastPayloadCacheKey(), [
+            'claim' => $factCheck['claim'],
+            'analysis' => $factCheck['analysis'],
+            'overall_verdict' => $factCheck['overall_verdict'],
+            'scene' => $scene,
+            'switched_at_ms' => $switchedAtMs,
+            'switched_at' => now()->toIso8601String(),
+        ], now()->addMinutes(10));
 
         FactCheckContentUpdated::dispatch($factCheck, $scene, $switchedAtMs);
 
@@ -53,5 +61,10 @@ class StreamFactCheckController extends Controller
     protected function lastSwitchAtCacheKey(): string
     {
         return sprintf('%s:last-switch-at-ms', (string) config('obs.cache.prefix'));
+    }
+
+    protected function lastPayloadCacheKey(): string
+    {
+        return sprintf('%s:last-payload', (string) config('obs.cache.prefix'));
     }
 }

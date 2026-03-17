@@ -3,6 +3,7 @@ import json
 import asyncio 
 import re
 import random
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 from urllib.parse import urlparse
@@ -1077,17 +1078,36 @@ async def post_fact_check_result(payload: dict) -> dict:
         return requests.post(url, json=payload, timeout=10)
 
     try:
+        posted_at_utc = datetime.now(timezone.utc).isoformat(timespec="milliseconds").replace(
+            "+00:00", "Z"
+        )
         response = await asyncio.to_thread(_do_post)
         body_preview = response.text[:1000]
+        receiver_timestamp_utc = ""
+        try:
+            response_json = response.json()
+            if isinstance(response_json, dict):
+                for key in ("timestamp_utc", "timestamp", "timestampUtc"):
+                    value = response_json.get(key)
+                    if isinstance(value, str) and value.strip():
+                        receiver_timestamp_utc = value.strip()
+                        break
+        except Exception:
+            pass
         return {
             "posted": response.ok,
             "status_code": response.status_code,
             "url": url,
+            "posted_at_utc": posted_at_utc,
+            "receiver_timestamp_utc": receiver_timestamp_utc,
             "response_body_preview": body_preview,
         }
     except Exception as exc:
         return {
             "posted": False,
             "url": url,
+            "posted_at_utc": datetime.now(timezone.utc)
+            .isoformat(timespec="milliseconds")
+            .replace("+00:00", "Z"),
             "error": str(exc),
         }

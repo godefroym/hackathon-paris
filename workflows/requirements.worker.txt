@@ -2,3 +2,4 @@ temporalio
 mistralai
 python-dotenv
 requests
+pydantic

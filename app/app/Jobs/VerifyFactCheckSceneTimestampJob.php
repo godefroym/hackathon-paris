@@ -37,14 +37,26 @@ class VerifyFactCheckSceneTimestampJob implements ShouldQueue
 
         $obsSceneSwitcher->switchToScene($programDefaultScene);
 
-        FactCheckContentUpdated::dispatch([
+        $emptyFactCheck = [
             'claim' => ['text' => ''],
             'analysis' => [
                 'summary' => '',
                 'sources' => [],
             ],
             'overall_verdict' => '',
-        ], $programDefaultScene, now()->getTimestampMs());
+        ];
+        $switchedAtMs = now()->getTimestampMs();
+
+        $this->cache()->put($this->lastPayloadCacheKey(), [
+            'claim' => $emptyFactCheck['claim'],
+            'analysis' => $emptyFactCheck['analysis'],
+            'overall_verdict' => $emptyFactCheck['overall_verdict'],
+            'scene' => $programDefaultScene,
+            'switched_at_ms' => $switchedAtMs,
+            'switched_at' => now()->toIso8601String(),
+        ], now()->addMinutes(10));
+
+        FactCheckContentUpdated::dispatch($emptyFactCheck, $programDefaultScene, $switchedAtMs);
     }
 
     protected function cache(): Repository
@@ -61,6 +73,11 @@ class VerifyFactCheckSceneTimestampJob implements ShouldQueue
     protected function lastSwitchAtCacheKey(): string
     {
         return sprintf('%s:last-switch-at-ms', (string) config('obs.cache.prefix'));
+    }
+
+    protected function lastPayloadCacheKey(): string
+    {
+        return sprintf('%s:last-payload', (string) config('obs.cache.prefix'));
     }
 
     protected function elapsedMilliseconds(int $timestampMs): int
