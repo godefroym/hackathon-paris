@@ -21,13 +21,36 @@ export function normalizeVerdict(value: string): string {
 export function isFalseLike(payload: FactCheckPayload): boolean {
   const verdict = normalizeVerdict(payload.overall_verdict)
   const summary = payload.analysis.summary.toLowerCase()
+  const claim = payload.claim.text.toLowerCase()
+  const looksStatistical = /\d/.test(claim)
+    || claim.includes('pourcent')
+    || claim.includes('pourcentage')
+    || claim.includes('plus de')
+    || claim.includes('moins de')
+    || claim.includes('plus que')
+    || claim.includes('moins que')
+    || claim.includes('moyenne')
+    || claim.includes('millions')
+    || claim.includes('milliards')
+    || claim.includes('litres')
+    || claim.includes('kg')
+    || claim.includes('kilogrammes')
+
+  const strongFalseSummary = summary.includes('❌')
+    || summary.includes(' faux')
+    || summary.startsWith('faux')
+    || summary.includes('erron')
+    || summary.includes('mensonger')
+    || summary.includes('mensongere')
+    || summary.includes('mensongère')
+    || summary.includes('incorrect')
+    || summary.includes('et non')
 
   return verdict.includes('inaccurate')
     || verdict.includes('false')
     || verdict.includes('faux')
-    || summary.includes('❌')
-    || summary.includes(' faux')
-    || summary.startsWith('faux')
+    || strongFalseSummary
+    || (looksStatistical && strongFalseSummary)
 }
 
 export function hasRenderableContent(payload: FactCheckPayload): boolean {

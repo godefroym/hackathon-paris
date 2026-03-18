@@ -1,6 +1,11 @@
 <?php
 
 return [
+    'required' => filter_var(
+        env('OBS_REQUIRED', false),
+        FILTER_VALIDATE_BOOL,
+    ),
+
     'connection' => [
         'host' => env('OBS_HOST', '127.0.0.1'),
         'port' => (int) env('OBS_PORT', 4455),

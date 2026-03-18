@@ -17,6 +17,7 @@ from pydantic import BaseModel, Field
 import requests
 from mistralai import Mistral
 from dotenv import load_dotenv
+from transcript_archive import archive_transcript_entry_payload
 
 # --- SÉCURITÉ IMPORTS ---
 try:
@@ -32,21 +33,40 @@ env_path = Path("cle.env").absolute()
 load_dotenv(dotenv_path=env_path, override=True)
 client = Mistral(api_key=os.getenv("MISTRAL_API_KEY"))
 
-try:
-    from activities import (
-        check_next_phrase_self_correction as _local_check_next_phrase_self_correction,
-    )
-except Exception:
-    _local_check_next_phrase_self_correction = None
-
 _FAST_MODEL = "mistral-small-latest"
 _SMART_MODEL = "mistral-medium-latest"
 _BEST_MODEL = "mistral-large-latest"
 
 CACHE_RESULTATS_GLOBAUX = {}
-TIER_1_GOUV = ["gouv.fr", "insee.fr", "senat.fr", "assemblee-nationale.fr", "vie-publique.fr", "data.gouv.fr", "ameli.fr", "inserm.fr","ansm.sante.fr","anses.fr","service-publics.fr","conseil-etat.fr","actu-juridique.fr","banque-france.fr","cnrs.fr","iniria.fr","cea.fr","archives-ouvertes.fr","cnes.fr","techniques-ingenieur.fr"]
-TIER_2_MEDIAS = ["lemonde.fr", "lefigaro.fr", "liberation.fr", "humanite.fr", "marianne.net", "francetvinfo.fr", "radiofrance.fr", "lesechos.fr", "ouest-france.fr", "france24.com", "franceinfo.fr", "20minutes.fr", "actu.orange.fr", "tf1info.fr","lexpress.fr","dalloz-actualite.fr","ofce.sciences-po.fr","75secondes.fr","legifiscal.fr","fr.wikipedia.org","reporterre.net","mouvement-europeen.eu"]
-SOCIAL_BLACKLIST = ["tiktok.com", "facebook.com", "instagram.com", "x.com", "twitter.com", "youtube.com", "linkedin.com", "reddit.com", "pinterest.com", "4chan.org"]
+
+# --- TIERS fusionnés et complétés pour le pipeline Emma ---
+TIER_1_GOUV = [
+    "gouv.fr", "insee.fr", "ameli.fr", "vie-publique.fr", "senat.fr", "assemblee-nationale.fr", "data.gouv.fr",
+    "inserm.fr", "ansm.sante.fr", "anses.fr", "service-public.fr", "conseil-etat.fr", "actu-juridique.fr",
+    "banque-france.fr", "cnrs.fr", "inria.fr", "cea.fr", "archives-ouvertes.fr", "cnes.fr", "techniques-ingenieur.fr"
+]
+TIER_2_MEDIAS = [
+    "actu.fr", "francebleu.fr", "lemonde.fr", "liberation.fr", "rfi.fr", "lepoint.fr", "ladepeche.fr", "france24.com",
+    "franceculture.fr", "20minutes.fr", "ouest-france.fr", "mediapart.fr", "numerama.com", "lefigaro.fr", "franceinfo.fr",
+    "afp.com", "sudouest.fr", "lesechos.fr", "marianne.net", "francetvinfo.fr", "radiofrance.fr", "actu.orange.fr",
+    "tf1info.fr", "lexpress.fr", "dalloz-actualite.fr", "ofce.sciences-po.fr", "75secondes.fr", "legifiscal.fr",
+    "fr.wikipedia.org", "reporterre.net", "mouvement-europeen.eu"
+]
+SOCIAL_BLACKLIST = [
+    "tiktok.com", "facebook.com", "instagram.com", "x.com", "twitter.com", "reddit.com", "pinterest.com"
+]
+CORRECTION_MARKERS = [
+    "pardon",
+    "je corrige",
+    "je me corrige",
+    "je me suis trompe",
+    "je me suis trompé",
+    "plutot",
+    "plutôt",
+    "rectification",
+    "en fait",
+    "non",
+]
 NON_FACTUAL_MARKERS = (
     "allo",
     "allô",
@@ -76,6 +96,30 @@ FACT_KEYWORDS = (
     "milliard",
     "million",
     "pourcent",
+    "pourcentage",
+    "plus que",
+    "moins que",
+    "supérieur à",
+    "superieur a",
+    "inférieur à",
+    "inferieur a",
+    "augmenté",
+    "augmente",
+    "augmentation",
+    "diminué",
+    "diminue",
+    "diminution",
+    "baissé",
+    "baisse",
+    "hausse",
+    "multiplié par",
+    "multiplie par",
+    "divisé par",
+    "divise par",
+    "moitié",
+    "moitie",
+    "double",
+    "triple",
 )
 FACT_VERBS = (
     " est ",
@@ -89,6 +133,72 @@ FACT_VERBS = (
     " dépasse ",
     " mesure ",
     " vaut ",
+)
+STAT_COMPARISON_MARKERS = (
+    "pourcent",
+    "pourcentage",
+    "plus que",
+    "moins que",
+    "plus de",
+    "moins de",
+    "supérieur à",
+    "superieur a",
+    "inférieur à",
+    "inferieur a",
+    "augmenté",
+    "augmente",
+    "augmentation",
+    "diminué",
+    "diminue",
+    "diminution",
+    "baissé",
+    "baisse",
+    "hausse",
+    "multiplié par",
+    "multiplie par",
+    "divisé par",
+    "divise par",
+    "fois plus",
+    "fois moins",
+    "moitié",
+    "moitie",
+    "double",
+    "triple",
+)
+EVENT_KEYWORDS = (
+    "jeux olympiques",
+    "jo ",
+    "olympique",
+    "olympiques",
+    "grève",
+    "greve",
+    "guerre",
+    "manifestation",
+    "loi",
+    "projet de loi",
+    "proposition de loi",
+    "décret",
+    "decret",
+    "réforme",
+    "reforme",
+    "élection",
+    "election",
+    "émeute",
+    "emeute",
+    "attentat",
+    "incendie",
+    "inondation",
+    "séisme",
+    "seisme",
+    "tour de france",
+    "coupe du monde",
+    "championnat",
+    "finale",
+    "match",
+    "crise",
+    "scandale",
+    "attaque",
+    "fait divers",
 )
 
 DEFAULT_FACT_CHECK_POST_URL = "http://localhost:8000/api/stream/fact-check"
@@ -271,11 +381,37 @@ def _score_source(url: str) -> int:
     return 10 
 
 
+
+# --- SÉCURITÉ : Vérification robuste de l'URL (vivante) ---
 def _is_http_url(url: str) -> bool:
     if not isinstance(url, str):
         return False
     lowered = url.strip().lower()
     return lowered.startswith("http://") or lowered.startswith("https://")
+
+async def _is_url_alive(url: str) -> bool:
+    if not _is_http_url(url):
+        return False
+    headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"}
+    def _do_ping():
+        import requests
+        try:
+            res = requests.get(url, headers=headers, timeout=4, allow_redirects=True)
+            if res.status_code >= 400:
+                return False
+            final_url = res.url
+            if urlparse(url).path.strip('/') != '' and urlparse(final_url).path.strip('/') == '':
+                print(f"⚠️ Redirection vers l'accueil bloquée : {url}")
+                return False
+            texte_page = res.text[:3000].lower()
+            mots_interdits = ["page introuvable", "erreur 404", "n'existe pas", "not found", "page non trouvée"]
+            if any(mot in texte_page for mot in mots_interdits):
+                print(f"⚠️ Soft-404 bloquée : {url}")
+                return False
+            return True
+        except requests.RequestException:
+            return False
+    return await asyncio.to_thread(_do_ping)
 
 
 def _normalize_sources(raw_sources: list[Any]) -> list[dict[str, str]]:
@@ -771,6 +907,28 @@ Règles :
 
 def _fallback_reference_sources(fact_focus_text: str) -> list[dict[str, str]]:
     lower = (fact_focus_text or "").lower()
+    if any(token in lower for token in ("jeux olympiques", "olympique", "olympiques", "jo ")):
+        return [
+            {
+                "organization": "olympics.com",
+                "url": "https://olympics.com/",
+            },
+            {
+                "organization": "ioc.org",
+                "url": "https://www.ioc.org/",
+            },
+        ]
+    if any(token in lower for token in ("loi", "projet de loi", "proposition de loi", "decret", "décret", "reforme", "réforme")):
+        return [
+            {
+                "organization": "legifrance.gouv.fr",
+                "url": "https://www.legifrance.gouv.fr/",
+            },
+            {
+                "organization": "vie-publique.fr",
+                "url": "https://www.vie-publique.fr/",
+            },
+        ]
     if any(token in lower for token in ("population", "êtres humains", "terre", "monde")):
         return [
             {
@@ -853,6 +1011,62 @@ def _build_emergency_degraded_output(
         "afficher_bandeau": True,
         "degraded_mode": True,
         "degraded_mode_reason": "emergency_static_fallback",
+    }
+
+
+def _build_event_context_fallback(
+    atomic_fact_text: str,
+    *,
+    output_language: str,
+    sources: list[dict[str, str]],
+) -> dict[str, Any] | None:
+    if not _looks_like_event_context(atomic_fact_text):
+        return None
+
+    normalized_sources = _normalize_sources(sources)
+    if not normalized_sources:
+        normalized_sources = _fallback_reference_sources(atomic_fact_text)
+    normalized_sources = _normalize_sources(normalized_sources)
+    if not normalized_sources:
+        return None
+
+    lower = atomic_fact_text.lower()
+    if any(token in lower for token in ("jeux olympiques", "olympique", "olympiques", "jo ")):
+        summary_fr = (
+            "Contexte : les Jeux olympiques renvoient a un evenement sportif international encadre par le CIO. "
+            "La formulation entendue doit etre rattachee a l'edition precise evoquee et verifiee avec les sources officielles ci-dessous."
+        )
+        summary_en = (
+            "Context: the Olympic Games are an international sporting event overseen by the IOC. "
+            "The spoken statement should be tied to the specific edition being referenced and checked against the official sources below."
+        )
+    elif any(token in lower for token in ("loi", "projet de loi", "proposition de loi", "decret", "décret", "reforme", "réforme")):
+        summary_fr = (
+            "Contexte : cette phrase renvoie a un texte legislatif ou reglementaire qu'il faut rattacher au bon projet, decret ou reforme. "
+            "Le cadrage journalistique doit donc s'appuyer sur les sources institutionnelles listees ci-dessous."
+        )
+        summary_en = (
+            "Context: this statement refers to a legislative or regulatory text that must be tied to the correct bill, decree, or reform. "
+            "The journalistic framing should rely on the institutional sources listed below."
+        )
+    else:
+        summary_fr = (
+            "Contexte : cette phrase renvoie a un evenement public identifiable qui doit etre resitue dans son edition, sa date ou sa sequence exacte. "
+            "Le cadrage peut s'appuyer sur les sources ci-dessous."
+        )
+        summary_en = (
+            "Context: this statement refers to an identifiable public event that should be placed in its exact edition, date, or sequence. "
+            "The framing can rely on the sources below."
+        )
+
+    summary = summary_en if output_language == "en" else summary_fr
+    return {
+        "claim": {"text": str(atomic_fact_text)},
+        "analysis": {"summary": summary, "sources": normalized_sources[:3]},
+        "overall_verdict": "context",
+        "afficher_bandeau": True,
+        "degraded_mode": True,
+        "degraded_mode_reason": "event_context_fallback",
     }
 
 
@@ -1077,9 +1291,107 @@ def build_routeur_prompt(clean_text: str) -> str:
     return f"""MISSION : Routeur de fact-checking. Phrase : '{clean_text}'
     1. VÉRIFIABILITÉ (est_verifiable) : True si la phrase affirme un fact ou une stat. False si c'est le futur ("Nous ferons") ou un voeu. Une opinion contenant un fait reste vérifiable (True).
     2. run_stats : True si présence d'une quantité, chiffre, prix, ou mots "aucun/tous/zéro".
-    3. run_contexte : True UNIQUEMENT pour un événement historique, guerre ou loi. 🚨 Faux pour l'économie.
+    3. run_contexte : True pour un événement réel ou public identifiable : guerre, grève, manifestation, élection, compétition sportive, Jeux Olympiques, crise, fait divers, loi, annonce politique. Faux pour une simple tendance économique sans événement précis.
     4. run_coherence : True si l'orateur jure n'avoir "jamais" changé d'avis.
     5. run_rhetorique : True si une question de journaliste est fournie."""
+
+
+def _looks_like_event_context(text: str) -> bool:
+    lowered = text.lower().strip()
+    if not lowered:
+        return False
+    return any(keyword in lowered for keyword in EVENT_KEYWORDS)
+
+
+def _looks_like_statistical_claim(text: str) -> bool:
+    lowered = text.lower().strip()
+    if not lowered:
+        return False
+    if any(marker in lowered for marker in STAT_COMPARISON_MARKERS):
+        return True
+    if any(keyword in lowered for keyword in FACT_KEYWORDS):
+        return True
+    return False
+
+
+def _extract_current_affirmation(current_json: dict[str, Any]) -> str:
+    current = current_json.get("affirmation_courante")
+    if isinstance(current, str) and current.strip():
+        return current.strip()
+    fallback = current_json.get("affirmation")
+    if isinstance(fallback, str) and fallback.strip():
+        return fallback.strip()
+    return ""
+
+
+def _extract_previous_context_phrases(
+    last_minute_json: dict[str, Any], current_affirmation: str
+) -> list[str]:
+    previous_phrases = last_minute_json.get("previous_phrases")
+    if isinstance(previous_phrases, list):
+        return [
+            phrase.strip()
+            for phrase in previous_phrases
+            if isinstance(phrase, str) and phrase.strip()
+        ]
+
+    phrases = [
+        phrase.strip()
+        for phrase in last_minute_json.get("phrases", [])
+        if isinstance(phrase, str) and phrase.strip()
+    ]
+    if phrases and current_affirmation and phrases[-1] == current_affirmation:
+        return phrases[:-1]
+    return phrases
+
+
+def _extract_numbers(text: str) -> list[str]:
+    if not isinstance(text, str):
+        return []
+    return re.findall(r"\d+(?:[.,]\d+)?", text)
+
+
+def _heuristic_self_correction(
+    current_affirmation: str, next_affirmation: str
+) -> dict[str, Any]:
+    normalized_next = (next_affirmation or "").strip().lower()
+    if not normalized_next:
+        return {
+            "next_is_correction": False,
+            "confidence": 0.0,
+            "reason": "",
+            "detector": "heuristic",
+        }
+
+    words = re.findall(r"[a-zA-ZÀ-ÿ0-9]+", normalized_next)
+    has_marker = any(marker in normalized_next for marker in CORRECTION_MARKERS)
+    current_numbers = _extract_numbers(current_affirmation)
+    next_numbers = _extract_numbers(next_affirmation)
+    replaces_number = bool(current_numbers and next_numbers and current_numbers != next_numbers)
+    short_followup = len(words) <= 10
+
+    if has_marker and (replaces_number or short_followup):
+        return {
+            "next_is_correction": True,
+            "confidence": 0.95 if replaces_number else 0.85,
+            "reason": "Correction explicite detectee (marqueur de correction).",
+            "detector": "heuristic",
+        }
+
+    if replaces_number and short_followup:
+        return {
+            "next_is_correction": True,
+            "confidence": 0.75,
+            "reason": "Valeur numerique remplacee dans une phrase courte.",
+            "detector": "heuristic",
+        }
+
+    return {
+        "next_is_correction": False,
+        "confidence": 0.2,
+        "reason": "Pas de signal clair de correction explicite.",
+        "detector": "heuristic",
+    }
 
 def build_stat_prompt(affirmation: str, sources_text: str) -> str:
     return f"""MISSION : Fact-checking STATISTIQUE.
@@ -1303,8 +1615,8 @@ async def analyze_debate_line(current_json: dict, last_minute_json: dict) -> dic
             texte_lower = atomic_fact_text.lower()
             
             # 1. Recherche des mots-clés quantitatifs
-            mots_stats = ["aucun", "zéro", "plus un seul", "tous", "%", "pourcent"]
-            has_stat_word = any(mot in texte_lower for mot in mots_stats)
+            mots_stats = ["aucun", "zéro", "plus un seul", "tous", "%"]
+            has_stat_word = any(mot in texte_lower for mot in mots_stats) or _looks_like_statistical_claim(atomic_fact_text)
             
             # 2. Recherche intelligente de nombres (Exclut les années 19xx et 20xx)
             nombres = re.findall(r'\b\d+\b', atomic_fact_text)
@@ -1317,6 +1629,9 @@ async def analyze_debate_line(current_json: dict, last_minute_json: dict) -> dic
             if has_stat_word or has_real_number:
                 print("🛡️ [RATTRAPAGE] Vraie quantité détectée. Forçage run_stats=True.")
                 routage["run_stats"] = True
+        if not routage.get("run_contexte") and _looks_like_event_context(atomic_fact_text):
+            print("🛡️ [RATTRAPAGE] Événement détecté. Forçage run_contexte=True.")
+            routage["run_contexte"] = True
     else:
         print("🛡️ [GARDE-FOU] Opinion ou Futur détecté par le Routeur. Annulation.")
         obs_vide = {
@@ -1438,6 +1753,27 @@ async def analyze_debate_line(current_json: dict, last_minute_json: dict) -> dic
         # so the payload remains postable for the overlay API contract.
         sources_obs = _normalize_sources(toutes_les_sources)
 
+    if routage.get("run_contexte") and not summary_output_text:
+        context_fallback = _build_event_context_fallback(
+            atomic_fact_text,
+            output_language=output_language,
+            sources=sources_obs or toutes_les_sources,
+        )
+        if context_fallback is not None:
+            print("🩹 [FALLBACK CONTEXTE] sortie contexte événementiel utilisée.")
+            claim_output_text = str(
+                context_fallback.get("claim", {}).get("text", claim_output_text)
+            ).strip() or claim_output_text
+            summary_output_text = str(
+                context_fallback.get("analysis", {}).get("summary", "")
+            ).strip()
+            sources_obs = _normalize_sources(
+                context_fallback.get("analysis", {}).get("sources", [])
+            )
+            verdict_obs = str(
+                context_fallback.get("overall_verdict", verdict_obs)
+            ).strip() or verdict_obs
+
     if not summary_output_text or not sources_obs:
         targeted_fallback = _build_emergency_degraded_output(
             original_assertion_for_analysis,
@@ -1473,18 +1809,95 @@ async def analyze_debate_line(current_json: dict, last_minute_json: dict) -> dic
 
 @activity.defn
 async def check_next_phrase_self_correction(current_json: dict, next_json: dict | None, last_minute_json: dict) -> dict:
-    if _local_check_next_phrase_self_correction is None:
+    current_affirmation = _extract_current_affirmation(current_json)
+    next_affirmation = _extract_current_affirmation(next_json or {})
+
+    if not current_affirmation:
         return {
-            "has_next_phrase": bool(next_json),
+            "has_next_phrase": bool(next_affirmation),
             "next_is_correction": False,
             "confidence": 0.0,
-            "reason": "Fallback: local correction detector unavailable.",
+            "reason": "Phrase courante vide.",
         }
-    return await _local_check_next_phrase_self_correction(
-        current_json,
-        next_json,
-        last_minute_json,
+
+    if not next_affirmation:
+        return {
+            "has_next_phrase": False,
+            "next_is_correction": False,
+            "confidence": 0.0,
+            "reason": "Aucune phrase suivante complete.",
+        }
+
+    heuristic = _heuristic_self_correction(current_affirmation, next_affirmation)
+    if bool(heuristic.get("next_is_correction")):
+        return {
+            "has_next_phrase": True,
+            "next_is_correction": True,
+            "confidence": float(heuristic.get("confidence", 0.0)),
+            "reason": str(heuristic.get("reason", "")),
+            "detector": "heuristic",
+            "current_affirmation": current_affirmation,
+            "next_affirmation": next_affirmation,
+        }
+
+    contexte_precedent = " ".join(
+        _extract_previous_context_phrases(last_minute_json, current_affirmation)
     )
+    prompt = f"""Tu es un detecteur de correction en direct.
+
+PHRASE_COURANTE:
+"{current_affirmation}"
+
+PHRASE_SUIVANTE:
+"{next_affirmation}"
+
+CONTEXTE_PRECEDENT:
+"{contexte_precedent}"
+
+Mission:
+- Determine si PHRASE_SUIVANTE corrige/retracte explicitement PHRASE_COURANTE.
+- Exemples de correction: "je corrige", "je me suis trompe", "non plutot", nouveau chiffre qui remplace le precedent.
+- Si PHRASE_SUIVANTE est seulement un ajout, une nouvelle idee ou une reformulation, alors ce n'est PAS une correction.
+
+Renvoie UNIQUEMENT ce JSON strict:
+{{
+  "next_is_correction": true|false,
+  "confidence": 0.0,
+  "reason": "court"
+}}
+"""
+    try:
+        parsed = await _mistral_json(prompt)
+        next_is_correction = bool(parsed.get("next_is_correction", False))
+        try:
+            confidence = float(parsed.get("confidence", 0.0))
+        except (TypeError, ValueError):
+            confidence = 0.0
+        confidence = max(0.0, min(1.0, confidence))
+        reason = str(parsed.get("reason", "")).strip()
+        return {
+            "has_next_phrase": True,
+            "next_is_correction": next_is_correction,
+            "confidence": confidence,
+            "reason": reason,
+            "detector": "llm",
+            "current_affirmation": current_affirmation,
+            "next_affirmation": next_affirmation,
+        }
+    except Exception as exc:
+        return {
+            "has_next_phrase": True,
+            "next_is_correction": bool(heuristic.get("next_is_correction", False)),
+            "confidence": float(heuristic.get("confidence", 0.0)),
+            "reason": (
+                f"LLM indisponible, fallback heuristique: "
+                f"{heuristic.get('reason', 'indetermine')}"
+            ),
+            "detector": "heuristic_fallback_after_llm_error",
+            "error": str(exc),
+            "current_affirmation": current_affirmation,
+            "next_affirmation": next_affirmation,
+        }
 
 @activity.defn
 async def post_fact_check_result(payload: dict) -> dict:
@@ -1508,3 +1921,8 @@ async def post_fact_check_result(payload: dict) -> dict:
             "posted_at_utc": posted_at,
             "error": str(e),
         }
+
+
+@activity.defn
+async def archive_transcript_entry(payload: dict) -> dict:
+    return await asyncio.to_thread(archive_transcript_entry_payload, payload)

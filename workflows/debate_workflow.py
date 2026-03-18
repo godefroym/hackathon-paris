@@ -19,6 +19,7 @@ from debate_config import (
 ANALYZE_ACTIVITY_NAME = "analyze_debate_line"
 SELF_CORRECTION_ACTIVITY_NAME = "check_next_phrase_self_correction"
 POST_ACTIVITY_NAME = "post_fact_check_result"
+ARCHIVE_ACTIVITY_NAME = "archive_transcript_entry"
 
 
 def _claim_text_from_current_json(current_json: dict[str, Any]) -> str:
@@ -162,8 +163,6 @@ def _infer_non_postable_reason(
 ) -> str:
     if not isinstance(analysis_result, dict):
         return "analysis_not_dict"
-    if not bool(analysis_result.get("afficher_bandeau", False)):
-        return "afficher_bandeau_false"
 
     ready_claim = analysis_result.get("claim")
     ready_analysis = analysis_result.get("analysis")
@@ -198,9 +197,6 @@ def _build_fact_check_api_payload(
     current_json: dict[str, Any], analysis_result: Any
 ) -> dict[str, Any] | None:
     if not isinstance(analysis_result, dict):
-        return None
-
-    if not bool(analysis_result.get("afficher_bandeau", False)):
         return None
 
     # Support Emma-style activities output that is already API-ready.
@@ -359,6 +355,26 @@ class DebateJsonNoopWorkflow:
                     start_to_close_timeout=timedelta(seconds=DEFAULT_POST_TIMEOUT_SECONDS),
                 )
 
+        archive_result: dict[str, Any]
+        try:
+            archive_result = await workflow.execute_activity(
+                ARCHIVE_ACTIVITY_NAME,
+                args=[{
+                    "workflow_id": workflow.info().workflow_id,
+                    "current_json": current_json,
+                    "analysis_result": analysis_result,
+                    "post_payload": post_payload,
+                    "post_result": post_result,
+                    "correction_check": correction_check,
+                }],
+                start_to_close_timeout=timedelta(seconds=10),
+            )
+        except Exception as exc:
+            archive_result = {
+                "archived": False,
+                "error": str(exc),
+            }
+
         workflow.logger.info(
             "Workflow completed",
             pre_post_elapsed_seconds=pre_post_elapsed,
@@ -414,6 +430,7 @@ class DebateJsonNoopWorkflow:
             "analysis_result": analysis_result,
             "post_payload_preview": post_payload,
             "post_result": post_result,
+            "archive_result": archive_result,
             "timing_debug": {
                 "phrase_start_timestamp": phrase_start_raw,
                 "phrase_end_timestamp": phrase_end_raw,

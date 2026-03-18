@@ -5,7 +5,7 @@ from temporalio import workflow
 
 with workflow.unsafe.imports_passed_through():
     from workflows import SayHelloWorkflow
-    from activities import greet
+    from Trash.activities import greet
 
 async def main():
     client = await Client.connect("localhost:7233")

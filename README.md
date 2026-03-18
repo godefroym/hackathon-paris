@@ -1,329 +1,429 @@
-# Veriscope - Realtime Fact-Checking for Live Debates
+# Veristral
 
-Veriscope is a real-time pipeline that:
+## Présentation du projet
 
-1. captures live speech from a microphone,
-2. transcribes complete phrases continuously,
-3. launches one Temporal workflow per phrase,
-4. runs fact-check analysis,
-5. posts validated results to the app API,
-6. broadcasts overlay updates for OBS.
+Veristral est une pipeline de fact-checking temps réel pour débats, interviews et prises de parole en direct.
 
-The project is designed for political-debate streams with a configurable video delay (default: 30s).
+Le système :
 
-## What is in this repository
+1. capture l'audio depuis un micro,
+2. transcrit les phrases complètes,
+3. envoie chaque phrase dans Temporal,
+4. analyse la phrase avec un pipeline de fact-check,
+5. poste le résultat vers l'application Laravel,
+6. diffuse un bandeau overlay,
+7. archive la transcription complète avec les fact-checks associés.
 
-This repo contains 3 connected subsystems:
+Le dépôt contient donc trois briques principales :
 
-- `texte/` and `ingestion/`: realtime speech-to-text and JSON emission.
-- `workflows/`: Temporal launcher, workflow, worker, activities (analysis + POST).
-- `app/`: Laravel API + broadcast overlay page (`/overlays/fact-check`) + OBS scene switching.
+- `texte/` et `ingestion/` : transcription temps réel,
+- `workflows/` : orchestration Temporal + analyse,
+- `app/` : API Laravel + overlay temps réel.
 
-## End-to-end data flow
+## Architecture complète du dépôt
 
-```mermaid
-flowchart LR
-  Mic["Virtual/Physical Mic"] --> STT["Realtime STT (Mistral)"]
-  STT --> JSONL["JSONL transcript lines"]
-  JSONL --> Launcher["workflows/debate_jsonl_to_temporal.py"]
-  Launcher --> Temporal["Temporal Workflow per line"]
-  Temporal --> Activity["analyze_debate_line + correction check"]
-  Activity --> Post["POST /api/stream/fact-check"]
-  Post --> App["Laravel app-web"]
-  App --> Reverb["Broadcast stream.fact-check"]
-  Reverb --> Overlay["/overlays/fact-check in OBS Browser Source"]
+Arborescence racine et niveau 2 :
+
+```text
+.
+├── .docs/
+│   └── obs-mediamtx-setup.md
+├── .env
+├── .env.example
+├── .gitignore
+├── .venv/
+│   ├── bin/
+│   ├── include/
+│   ├── lib/
+│   ├── .gitignore
+│   └── pyvenv.cfg
+├── README.md
+├── Trash/
+│   ├── Agents.ipynb
+│   ├── README.md
+│   ├── Untitled.ipynb
+│   ├── activities.py
+│   └── test_agents.ipynb
+├── antigravity.env/
+├── app/
+│   ├── .dockerignore
+│   ├── .editorconfig
+│   ├── .env
+│   ├── .env.example
+│   ├── .gitattributes
+│   ├── .github/
+│   ├── .gitignore
+│   ├── .npmrc
+│   ├── .vscode/
+│   ├── AGENTS.md
+│   ├── Dockerfile
+│   ├── README.md
+│   ├── app/
+│   ├── artisan
+│   ├── boost.json
+│   ├── bootstrap/
+│   ├── composer.json
+│   ├── composer.lock
+│   ├── config/
+│   ├── database/
+│   ├── docker/
+│   ├── eslint.config.js
+│   ├── package.json
+│   ├── phpunit.xml
+│   ├── pint.json
+│   ├── pnpm-lock.yaml
+│   ├── public/
+│   ├── resources/
+│   ├── routes/
+│   ├── storage/
+│   ├── tests/
+│   ├── tsconfig.app.json
+│   ├── tsconfig.json
+│   ├── tsconfig.node.json
+│   └── vite.config.ts
+├── cle.env
+├── cle.env.example
+├── debug_micro.jsonl
+├── docker-compose.yml
+├── dynamicconfig/
+│   ├── README.md
+│   ├── development-cass.yaml
+│   ├── development-sql.yaml
+│   └── docker.yaml
+├── ingestion/
+│   ├── README.md
+│   ├── realtime_transcript.py
+│   └── requirements.txt
+├── mediamtx.yml
+├── reports/
+│   ├── live_transcripts/
+│   └── mistral_503_discord_report_2026-03-17.md
+├── requirements.txt
+├── scripts/
+│   ├── create-namespace.sh
+│   ├── mock_fact_check_receiver.py
+│   ├── run_stack.sh
+│   ├── setup-cassandra-es.sh
+│   ├── setup-mysql-es.sh
+│   ├── setup-mysql.sh
+│   ├── setup-postgres-es-tls.sh
+│   ├── setup-postgres-es.sh
+│   ├── setup-postgres-opensearch.sh
+│   ├── setup-postgres.sh
+│   └── validate-temporal.sh
+├── texte/
+│   ├── README.md
+│   ├── realtime_transcript_elevenlabs.py
+│   ├── realtime_transcript_fusion.py
+│   ├── requirements.txt
+│   ├── run_elevenlabs_to_temporal.sh
+│   └── run_fusion_to_temporal.sh
+└── workflows/
+    ├── .python-version
+    ├── Dockerfile
+    ├── README.md
+    ├── activities_emma.py
+    ├── debate_config.py
+    ├── debate_jsonl_to_temporal.py
+    ├── debate_worker.py
+    ├── debate_workflow.py
+    ├── main.py
+    ├── pyproject.toml
+    ├── requirements.worker.txt
+    ├── transcript_archive.py
+    ├── uv.lock
+    ├── worker.py
+    └── workflows.py
 ```
 
-## Current behavior (important)
+Repères importants :
 
-- The fusion launcher is now **Mistral-only** for stability.
-- ElevenLabs scripts still exist, but `run_fusion_to_temporal.sh` forces `--providers mistral`.
-- One workflow is started per transcript line.
-- Delay is computed from the estimated phrase start (`metadata.timestamp_start`) to align display with delayed video.
+- `docker-compose.yml` : stack complète locale.
+- `cle.env` : configuration principale des workflows Python.
+- `texte/run_fusion_to_temporal.sh` : commande la plus directe pour lancer micro -> Temporal.
+- `workflows/activities_emma.py` : logique métier principale de fact-check.
+- `workflows/transcript_archive.py` : archivage de la transcription enrichie.
+- `app/routes/api.php` : endpoints API de fact-check.
+- `app/routes/web.php` : pages overlay.
+- `reports/live_transcripts/` : sorties archivées des sessions.
 
-## Directory map
+## Configuration de l'environnement
 
-- `README.md`: this file (global runbook).
-- `docker-compose.yml`: full stack (Temporal + app + worker + reverb + queue + mediamtx).
-- `scripts/run_stack.sh`: stack helper (`up/down/restart/ps/logs`).
-- `cle.env.example`: env template for workflows.
-- `texte/realtime_transcript_fusion.py`: realtime STT JSON emitter (Mistral stream).
-- `texte/run_fusion_to_temporal.sh`: one-command STT -> Temporal launcher.
-- `workflows/debate_jsonl_to_temporal.py`: reads JSONL, computes delay, starts workflows.
-- `workflows/debate_workflow.py`: Temporal workflow orchestration.
-- `workflows/activities.py`: fact-check analysis + POST to app API.
-- `app/routes/api.php`: `POST /api/stream/fact-check`.
-- `app/routes/web.php`: overlay page route.
+### Dépendances système
 
-## Prerequisites
+Prérequis recommandés :
 
-- Docker Desktop (with `docker compose`).
-- Python 3.11+ (local venv for transcription scripts).
-- A working input microphone (physical or virtual).
-- API key in `cle.env`.
+- Docker Desktop avec `docker compose`
+- Python 3.11+
+- un micro fonctionnel
+- accès réseau pour appeler Mistral
 
-## 1) Initial setup
+Selon la machine, PyAudio peut nécessiter des dépendances système supplémentaires.
 
-### 1.1 Clone and install Python dependencies
+### Dépendances Python
+
+Installer l'environnement local :
 
 ```bash
-cd /path/to/workspace
-git clone https://github.com/Barbapapazes/hackathon-paris.git
-cd hackathon-paris
-
-cd ingestion
 python3 -m venv .venv
 source .venv/bin/activate
 pip install -r requirements.txt
-pip install -r ../texte/requirements.txt
-cd ..
+pip install -r ingestion/requirements.txt
+pip install -r texte/requirements.txt
 ```
 
-### 1.2 Configure environment
+### Dépendances Docker / backend
 
-```bash
-cp cle.env.example cle.env
-```
-
-Fill at least:
-
-```bash
-MISTRAL_API_KEY=...
-FACT_CHECK_POST_URL=http://app-web:8000/api/stream/fact-check
-VIDEO_STREAM_DELAY_SECONDS=30
-FACT_CHECK_ANALYSIS_TIMEOUT_SECONDS=30
-```
-
-Notes:
-
-- `FACT_CHECK_POST_URL` should target `app-web` inside Docker network.
-- `cle.env` is auto-loaded by worker and transcript scripts.
-
-## 2) Start the full stack
-
-### Option A (recommended)
-
-```bash
-./scripts/run_stack.sh up --build
-```
-
-### Option B (raw compose)
+Le backend Laravel, Reverb, Temporal et le worker Python tournent via Docker :
 
 ```bash
 docker compose up -d --build
 ```
 
-### Health checks
+### Fichiers d'environnement
+
+À configurer :
+
+- `cle.env` : configuration du pipeline Python / worker
+- `app/.env` : configuration Laravel / Reverb / OBS
+
+Création initiale :
 
 ```bash
-docker compose ps
-./scripts/run_stack.sh logs workflows-worker
+cp cle.env.example cle.env
+cp app/.env.example app/.env
 ```
 
-Expected services:
+### Clés et variables importantes
 
-- `temporal` on `7233`
-- `temporal-ui` on `8080`
-- `app-web` on `8000`
-- `app-reverb` on `8081`
-- `app-queue`
-- `workflows-worker`
+Dans `cle.env` :
 
-## 3) Find microphone index
+- `MISTRAL_API_KEY` : obligatoire
+- `FACT_CHECK_ACTIVITY_IMPL=emma`
+- `FACT_CHECK_POST_URL=http://app-web:8000/api/stream/fact-check`
+- `PIPELINE_LANGUAGE=fr`
+- `FACT_CHECK_ANALYSIS_TIMEOUT_SECONDS=90`
+- `MISTRAL_AGENT_CALL_TIMEOUT_SECONDS=20`
+- `VIDEO_STREAM_DELAY_SECONDS=30` ou `0` pour les tests instantanés
 
-```bash
-source ingestion/.venv/bin/activate
-python texte/realtime_transcript_fusion.py --list-devices
-```
+Variables optionnelles utiles :
 
-Example output:
-
-- `index: 1, name: WOODBRASS UM3`
-- `index: 2, name: Microphone MacBook Air`
-
-Use `--input-device-index` with the selected index.
-
-## 4) Run realtime transcription -> Temporal -> fact-check
-
-```bash
-cd /Users/godefroy.meynard/Documents/test_datagouv_mcp/hackaton_audio/hackathon-paris
-source ingestion/.venv/bin/activate
-
-VIDEO_DELAY_SECONDS=30 MAX_WAIT_NEXT_PHRASE_SECONDS=0.5 ANALYSIS_TIMEOUT_SECONDS=20 \
-./texte/run_fusion_to_temporal.sh \
-  --input-device-index 1 \
-  --personne "Valérie Pécresse" \
-  --source-video "TF1 20h" \
-  --question-posee "" \
-  --show-decisions
-```
-
-What this does:
-
-- emits transcript JSON lines,
-- starts Temporal workflows continuously,
-- waits dynamic delay to match video stream,
-- posts postable fact-check payloads to `/api/stream/fact-check`.
-
-## 5) Validate in Temporal UI
-
-Open: `http://localhost:8080`
-
-For each workflow:
-
-1. open workflow execution,
-2. inspect `WorkflowExecutionCompleted` result,
-3. check:
-   - `analysis_result.afficher_bandeau`
-   - `post_result.posted`
-   - `post_result.status_code`
-   - `timing_debug.measured_delay_from_start_seconds`
-   - `timing_debug.delay_error_seconds`
-
-Interpretation:
-
-- `afficher_bandeau=false` => workflow intentionally skipped posting.
-- `analysis_not_postable` => no valid overlay payload built.
-- `posted=true` + `200` => API accepted and broadcast path should trigger.
-
-## 6) Validate overlay/API side
-
-### 6.1 API endpoint
-
-- Endpoint: `POST http://localhost:8000/api/stream/fact-check`
-- Route file: `app/routes/api.php`
-
-### 6.2 Overlay page for OBS
-
-- Overlay URL: `http://localhost:8000/overlays/fact-check`
-- Route file: `app/routes/web.php`
-
-### 6.3 Useful logs
-
-```bash
-docker compose logs -f app-web app-queue app-reverb workflows-worker
-```
-
-Look for:
-
-- `app-web`: `/api/stream/fact-check` hits,
-- `app-queue`: `VerifyFactCheckSceneTimestampJob` running,
-- `workflows-worker`: analysis activity and post results.
-
-## Transcript JSON contract
-
-Each emitted line follows:
-
-```json
-{
-  "personne": "Valérie Pécresse",
-  "question_posee": "",
-  "affirmation": "Last N committed phrases",
-  "affirmation_courante": "Current complete phrase",
-  "metadata": {
-    "source_video": "TF1 20h",
-    "timestamp_elapsed": "00:24",
-    "timestamp_start": "2026-03-01T13:37:11.031Z",
-    "timestamp_end": "2026-03-01T13:37:15.599Z",
-    "timestamp": "2026-03-01T13:37:15.599Z"
-  }
-}
-```
-
-`timestamp_start` is used for delay alignment.
-
-## Workflow input contract
-
-Each Temporal run receives:
-
-- `current_json`: current transcript line.
-- `last_minute_json`: aggregate context for last 60s.
-- `post_delay_seconds`: computed remaining delay before post.
-- `analysis_timeout_seconds`.
-- `next_json`: next phrase payload when available.
-
-## Runtime knobs
-
-You can tune behavior at launch time:
-
-- `VIDEO_DELAY_SECONDS` (default 30)
-- `MAX_WAIT_NEXT_PHRASE_SECONDS` (default 1.0)
-- `ANALYSIS_TIMEOUT_SECONDS` (default 30)
-
-And in `cle.env`:
-
-- `VIDEO_STREAM_DELAY_SECONDS`
-- `FACT_CHECK_ANALYSIS_TIMEOUT_SECONDS`
+- `GEMINI_API_KEY`
 - `MISTRAL_WEB_SEARCH_MODEL`
 - `SOURCE_SELECTION_MODE`
-- rate-limit backoff settings.
+- `FACT_CHECK_ANALYZE_ACTIVITY_MAX_ATTEMPTS`
+- variables de backoff Mistral
 
-## Troubleshooting
+Dans `app/.env` :
 
-### 1) `ModuleNotFoundError: mistralai`
+- `BROADCAST_CONNECTION=reverb`
+- `REVERB_*`
+- `VITE_REVERB_*`
+- `OBS_*` si usage OBS
 
-You are not in the venv or dependencies are missing.
+## Marche à suivre pour lancer le projet
+
+### 1. Préparer l'environnement
 
 ```bash
-cd ingestion
 python3 -m venv .venv
 source .venv/bin/activate
 pip install -r requirements.txt
-pip install -r ../texte/requirements.txt
+pip install -r ingestion/requirements.txt
+pip install -r texte/requirements.txt
+cp cle.env.example cle.env
+cp app/.env.example app/.env
 ```
 
-### 2) `zsh: command not found: temporal`
+### 2. Remplir les variables d'environnement
 
-Use Docker stack (`scripts/run_stack.sh`) instead of local Temporal binary.
+Renseigner au minimum dans `cle.env` :
 
-### 3) Worker restart loop: `Namespace default is not found`
+```env
+MISTRAL_API_KEY=...
+FACT_CHECK_ACTIVITY_IMPL=emma
+FACT_CHECK_POST_URL=http://app-web:8000/api/stream/fact-check
+PIPELINE_LANGUAGE=fr
+FACT_CHECK_ANALYSIS_TIMEOUT_SECONDS=90
+MISTRAL_AGENT_CALL_TIMEOUT_SECONDS=20
+```
 
-Ensure `temporal-create-namespace` completed successfully. Restart full stack:
+### 3. Démarrer la stack Docker
+
+Option recommandée :
 
 ```bash
-./scripts/run_stack.sh restart --build
+./scripts/run_stack.sh up --build
 ```
 
-### 4) `OSError: [Errno 48] Address already in use`
-
-Port is already used (often 8000). Stop conflicting process or use another port.
-
-### 5) Mistral realtime crash (`EngineDeadError`)
-
-The transcript script now includes auto-reconnect logic. If persistent, relaunch script and check API key/network.
-
-### 6) No overlay in OBS
-
-Check order:
-
-1. workflow actually posts (`post_result.posted=true`),
-2. app receives `/api/stream/fact-check`,
-3. OBS Browser Source points to `http://localhost:8000/overlays/fact-check`,
-4. OBS websocket scene names match app config.
-
-### 7) Why no POST even when transcription works
-
-Because workflow can intentionally skip when:
-
-- `afficher_bandeau=false`,
-- missing sources,
-- next phrase detected as self-correction.
-
-## Development workflow
+Option directe :
 
 ```bash
-git checkout -b codex/<feature>
-# edit
-python3 -m py_compile workflows/*.py texte/*.py
-bash -n texte/*.sh scripts/*.sh
-git add <files>
-git commit -m "feat: ..."
-git push origin codex/<feature>
+docker compose up -d --build
 ```
 
-## Additional docs
+### 4. Vérifier que les services sont up
 
-- `workflows/README.md`: Temporal-specific details.
-- `texte/README.md`: STT scripts and options.
-- `app/README.md`: API payload examples.
+```bash
+docker compose ps
+docker compose logs --tail=40 workflows-worker
+```
 
+Services attendus :
+
+- `app-web` : `http://localhost:8000`
+- `temporal-ui` : `http://localhost:8080`
+- `app-reverb` : `http://localhost:8081`
+- `temporal` : port `7233`
+
+### 5. Ouvrir les interfaces utiles
+
+- Overlay : `http://localhost:8000/overlays/fact-check-2`
+- Temporal UI : `http://localhost:8080/namespaces/default/workflows`
+
+### 6. Lancer la capture micro
+
+Lister les périphériques :
+
+```bash
+source .venv/bin/activate
+python texte/realtime_transcript_fusion.py --list-devices
+```
+
+Lancer le pipeline complet micro -> Temporal :
+
+```bash
+export VIDEO_DELAY_SECONDS=0
+export MAX_WAIT_NEXT_PHRASE_SECONDS=0.5
+./texte/run_fusion_to_temporal.sh \
+  --input-device-index 0 \
+  --personne "Emma" \
+  --source-video "Test micro Mac" \
+  --question-posee ""
+```
+
+### 7. Vérifier les sorties
+
+Ce qui doit apparaître :
+
+- workflows dans Temporal UI
+- bandeaux dans l'overlay
+- transcription archivée dans :
+
+```text
+reports/live_transcripts/<session_id>/
+```
+
+Fichiers produits :
+
+- `transcript.md`
+- `transcript.jsonl`
+- `entries/*.json`
+
+## Troubleshooting
+
+### Le micro ne remonte rien
+
+Vérifications :
+
+- lancer `python texte/realtime_transcript_fusion.py --list-devices`
+- vérifier l'index du micro
+- vérifier les permissions micro macOS
+
+### `Activity task timed out`
+
+Cause la plus fréquente :
+
+- timeout d'analyse trop court pendant un appel Mistral
+
+À vérifier :
+
+- `FACT_CHECK_ANALYSIS_TIMEOUT_SECONDS`
+- `MISTRAL_AGENT_CALL_TIMEOUT_SECONDS`
+- ne pas relancer avec un `ANALYSIS_TIMEOUT_SECONDS=20` hérité d'un ancien test
+
+### `post_result.status_code = 500`
+
+Cause probable :
+
+- erreur côté `app-web`
+
+Commandes utiles :
+
+```bash
+docker compose logs --tail=100 app-web
+docker compose logs --tail=100 app-reverb
+```
+
+### Le bandeau s'affiche en `Context` au lieu de `False claim`
+
+Cause probable :
+
+- verdict LLM incohérent
+- résumé pas assez explicite
+
+Le front applique maintenant une détection renforcée sur les faux chiffres, mais si besoin vérifier :
+
+- `app/resources/js/lib/factCheck.ts`
+- `overall_verdict`
+- `analysis.summary`
+
+### Le contexte ne s'affiche pas
+
+Cause probable :
+
+- l'agent contexte ou l'éditeur final a répondu vide
+
+Le pipeline contient désormais un fallback `Context` pour les événements identifiables :
+
+- JO / Jeux olympiques
+- grève
+- guerre
+- manifestation
+- élection
+- loi / décret / réforme
+
+### L'overlay ne reçoit rien
+
+Vérifier :
+
+- `app-web` répond bien sur `8000`
+- `app-reverb` tourne
+- la page overlay est rechargée après un rebuild front
+
+Commandes utiles :
+
+```bash
+docker compose ps
+docker compose logs --tail=100 app-web app-reverb workflows-worker
+```
+
+### Le worker ne charge pas la bonne implémentation
+
+Le worker principal charge uniquement :
+
+- `workflows/activities_emma.py`
+
+L'ancien module a été déplacé dans :
+
+- `Trash/activities.py`
+
+### Les transcriptions archivées n'apparaissent pas
+
+Vérifier :
+
+- que le workflow va jusqu'au bout
+- que `archive_result.archived` vaut `true`
+- que le dossier de session existe sous `reports/live_transcripts/`
+
+### Arrêter proprement la stack
+
+```bash
+./scripts/run_stack.sh down
+```
+
+ou :
+
+```bash
+docker compose down
+```
