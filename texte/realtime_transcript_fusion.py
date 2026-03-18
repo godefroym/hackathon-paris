@@ -1010,14 +1010,13 @@ async def fusion_export_loop(
         start_ts = phrase_start_ts or ts
         if start_ts > ts:
             start_ts = ts
-        merged_affirmation = " ".join(fused_recent_sentences)
         elapsed_seconds = int((start_ts - start_time).total_seconds())
         mm = elapsed_seconds // 60
         ss = elapsed_seconds % 60
         payload = {
             "personne": personne,
             "question_posee": question_posee,
-            "affirmation": merged_affirmation,
+            "affirmation": final_sentence,
             "affirmation_courante": final_sentence,
             "metadata": {
                 "source_video": source_video,
@@ -1267,7 +1266,7 @@ def parse_args() -> argparse.Namespace:
         "--recent-window",
         type=int,
         default=3,
-        help="How many recent complete fused phrases are merged into affirmation",
+        help="How many recent fused phrases are kept for internal arbitration context",
     )
     parser.add_argument(
         "--pair-max-skew-seconds",

@@ -265,7 +265,6 @@ async def receive_and_export(
 
             now_utc = datetime.now(timezone.utc)
             recent_sentences.append(sentence)
-            merged_affirmation = " ".join(recent_sentences)
 
             elapsed_seconds = int((now_utc - start_time).total_seconds())
             mm = elapsed_seconds // 60
@@ -274,7 +273,7 @@ async def receive_and_export(
                 {
                     "personne": personne,
                     "question_posee": question_posee,
-                    "affirmation": merged_affirmation,
+                    "affirmation": sentence,
                     "affirmation_courante": sentence,
                     "metadata": {
                         "source_video": source_video,
@@ -376,7 +375,7 @@ def parse_args() -> argparse.Namespace:
         "--recent-window",
         type=int,
         default=3,
-        help="How many latest committed phrases are merged into affirmation",
+        help="Deprecated: output now emits one committed phrase per JSON line",
     )
     parser.add_argument(
         "--show-partials",

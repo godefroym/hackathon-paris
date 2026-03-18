@@ -17,6 +17,7 @@ it('switches back to default scene when timestamp is unchanged after cooldown', 
     config()->set('obs.cache.prefix', 'obs:test');
     config()->set('obs.cooldown_seconds', 5);
     config()->set('obs.scenes.program_default', 'program-default');
+    config()->set('obs.persist_fact_check_scene', false);
 
     Event::fake([FactCheckContentUpdated::class]);
 
@@ -46,6 +47,7 @@ it('does not switch back when a newer timestamp is stored in cache', function ()
 
     config()->set('obs.cache.prefix', 'obs:test');
     config()->set('obs.cooldown_seconds', 5);
+    config()->set('obs.persist_fact_check_scene', false);
 
     Event::fake([FactCheckContentUpdated::class]);
 
@@ -67,6 +69,29 @@ it('does not switch back before cooldown elapses', function () {
 
     config()->set('obs.cache.prefix', 'obs:test');
     config()->set('obs.cooldown_seconds', 5);
+    config()->set('obs.persist_fact_check_scene', false);
+
+    Event::fake([FactCheckContentUpdated::class]);
+
+    Cache::put('obs:test:last-switch-at-ms', $expectedSwitchAtMs, now()->addMinutes(10));
+
+    $obsSceneSwitcher = \Mockery::mock(ObsSceneSwitcher::class);
+    $obsSceneSwitcher
+        ->shouldNotReceive('switchToScene');
+
+    (new VerifyFactCheckSceneTimestampJob($expectedSwitchAtMs))->handle($obsSceneSwitcher);
+
+    Event::assertNotDispatched(FactCheckContentUpdated::class);
+});
+
+it('does nothing when fact-check scene persistence is enabled', function () {
+    $expectedSwitchAtMs = 1_772_280_000_000;
+
+    CarbonImmutable::setTestNow(CarbonImmutable::createFromTimestampMs($expectedSwitchAtMs + 10_000));
+
+    config()->set('obs.cache.prefix', 'obs:test');
+    config()->set('obs.cooldown_seconds', 5);
+    config()->set('obs.persist_fact_check_scene', true);
 
     Event::fake([FactCheckContentUpdated::class]);
 

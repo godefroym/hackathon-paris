@@ -5,8 +5,10 @@ from datetime import datetime, timedelta, timezone
 from typing import Any
 
 from temporalio import workflow
+from temporalio.common import RetryPolicy
 
 from debate_config import (
+    DEFAULT_ANALYZE_ACTIVITY_MAX_ATTEMPTS,
     DEFAULT_ANALYSIS_TIMEOUT_SECONDS,
     DEFAULT_POST_TIMEOUT_SECONDS,
     DEFAULT_TASK_QUEUE,
@@ -286,10 +288,16 @@ class DebateJsonNoopWorkflow:
         )
 
         analysis_started = workflow.time()
+        analyze_retry_policy = (
+            RetryPolicy(maximum_attempts=DEFAULT_ANALYZE_ACTIVITY_MAX_ATTEMPTS)
+            if DEFAULT_ANALYZE_ACTIVITY_MAX_ATTEMPTS > 0
+            else None
+        )
         analysis_result = await workflow.execute_activity(
             ANALYZE_ACTIVITY_NAME,
             args=[current_json, last_minute_json],
             start_to_close_timeout=timedelta(seconds=analysis_timeout),
+            retry_policy=analyze_retry_policy,
         )
         correction_check = await workflow.execute_activity(
             SELF_CORRECTION_ACTIVITY_NAME,

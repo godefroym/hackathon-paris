@@ -5,11 +5,11 @@ x-laravel-app-common: &laravel-app-common
     context: ./app
     dockerfile: Dockerfile
     args:
-      VITE_APP_NAME: ${VITE_APP_NAME}
-      VITE_REVERB_APP_KEY: ${VITE_REVERB_APP_KEY}
-      VITE_REVERB_HOST: ${VITE_REVERB_HOST}
-      VITE_REVERB_PORT: ${VITE_REVERB_PORT}
-      VITE_REVERB_SCHEME: ${VITE_REVERB_SCHEME}
+      VITE_APP_NAME: ${VITE_APP_NAME:-Veristral}
+      VITE_REVERB_APP_KEY: ${VITE_REVERB_APP_KEY:-ttrmd93dkuczs0aeouur}
+      VITE_REVERB_HOST: ${VITE_REVERB_HOST:-localhost}
+      VITE_REVERB_PORT: ${VITE_REVERB_PORT:-8081}
+      VITE_REVERB_SCHEME: ${VITE_REVERB_SCHEME:-http}
   working_dir: /var/www/html
   env_file:
     - path: ./app/.env.production

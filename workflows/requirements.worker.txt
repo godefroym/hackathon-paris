@@ -1,5 +1,5 @@
 temporalio
-mistralai
+mistralai[realtime]==1.12.4
 python-dotenv
 requests
 pydantic

@@ -21,6 +21,7 @@ class FactCheckContentUpdated implements ShouldBroadcastNow
         public array $factCheck,
         public string $scene,
         public int $switchedAtMs,
+        public bool $clear = false,
     ) {}
 
     /**
@@ -52,6 +53,7 @@ class FactCheckContentUpdated implements ShouldBroadcastNow
             'scene' => $this->scene,
             'switched_at_ms' => $this->switchedAtMs,
             'switched_at' => CarbonImmutable::createFromTimestampMs($this->switchedAtMs)->toIso8601String(),
+            'clear' => $this->clear,
         ];
     }
 }

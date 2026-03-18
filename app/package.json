@@ -19,6 +19,7 @@
     "concurrently": "^9.0.1",
     "laravel-vite-plugin": "^2.0.0",
     "motion-v": "^2.0.0",
+    "qrcode": "^1.5.4",
     "tailwind-variants": "^3.2.2",
     "tailwindcss": "^4.1.1",
     "vite": "^7.0.4",

@@ -36,6 +36,7 @@ it('switches scene, broadcasts content, caches timestamp and dispatches delayed 
     config()->set('obs.scenes.program_default', 'program-default');
     config()->set('obs.cache.prefix', 'obs:test');
     config()->set('obs.cooldown_seconds', 5);
+    config()->set('obs.persist_fact_check_scene', false);
 
     Event::fake([FactCheckContentUpdated::class]);
     Bus::fake();
@@ -91,6 +92,41 @@ it('switches scene, broadcasts content, caches timestamp and dispatches delayed 
     Bus::assertDispatched(VerifyFactCheckSceneTimestampJob::class, function (VerifyFactCheckSceneTimestampJob $job) use ($cachedTimestamp): bool {
         return $job->expectedSwitchAtMs === $cachedTimestamp;
     });
+});
+
+it('keeps the fact-check scene persistent when configured', function () {
+    CarbonImmutable::setTestNow(CarbonImmutable::parse('2026-02-28 12:00:00 UTC'));
+
+    config()->set('obs.scenes.fact_check', 'fact-check');
+    config()->set('obs.cache.prefix', 'obs:test');
+    config()->set('obs.persist_fact_check_scene', true);
+
+    Event::fake([FactCheckContentUpdated::class]);
+    Bus::fake();
+
+    $obsSceneSwitcher = \Mockery::mock(ObsSceneSwitcher::class);
+    $obsSceneSwitcher
+        ->shouldReceive('switchToScene')
+        ->once()
+        ->with('fact-check');
+
+    $this->app->instance(ObsSceneSwitcher::class, $obsSceneSwitcher);
+
+    $this->postJson('/api/stream/fact-check', [
+        'claim' => ['text' => 'The Earth has 3 billion people.'],
+        'analysis' => [
+            'summary' => 'The world population is above 8 billion.',
+            'sources' => [
+                [
+                    'organization' => 'World Bank',
+                    'url' => 'https://data.worldbank.org/indicator/SP.POP.TOTL',
+                ],
+            ],
+        ],
+        'overall_verdict' => 'inaccurate',
+    ])->assertSuccessful();
+
+    Bus::assertNotDispatched(VerifyFactCheckSceneTimestampJob::class);
 });
 
 it('returns an api error when obs switch fails', function () {

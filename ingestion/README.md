@@ -9,7 +9,7 @@ Output schema:
 {
   "personne": "Valérie Pécresse",
   "question_posee": "",
-  "affirmation": "Dernieres phrases completes fusionnees",
+  "affirmation": "Derniere phrase complete",
   "affirmation_courante": "Derniere phrase complete",
   "metadata": {
     "source_video": "TF1 20h",
@@ -19,7 +19,8 @@ Output schema:
 }
 ```
 
-By default, `affirmation` merges the 3 latest complete sentences.
+`affirmation` et `affirmation_courante` contiennent maintenant uniquement la derniere phrase complete.
+Le contexte multi-phrases reste calcule plus loin par le launcher Temporal sur la derniere minute.
 `metadata.timestamp` is now precise (UTC ISO with milliseconds).
 
 ## Install

@@ -22,7 +22,7 @@ output the same JSON schema used by your existing Temporal pipeline.
 {
   "personne": "Valerie Pecresse",
   "question_posee": "",
-  "affirmation": "Last N committed phrases",
+  "affirmation": "Latest committed phrase",
   "affirmation_courante": "Latest committed phrase",
   "metadata": {
     "source_video": "TF1 20h",
@@ -34,7 +34,8 @@ output the same JSON schema used by your existing Temporal pipeline.
 }
 ```
 
-`affirmation` keeps a sliding window of the latest complete phrases (`--recent-window`, default `3`).
+`affirmation` and `affirmation_courante` now both contain the latest committed phrase only.
+The multi-phrase context is kept downstream in the Temporal `last_minute_json`.
 `metadata.timestamp_start` is the estimated phrase start used by the Temporal launcher
 to keep post timing close to `VIDEO_DELAY_SECONDS` from speech start.
 

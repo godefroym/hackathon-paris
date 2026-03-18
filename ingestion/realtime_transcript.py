@@ -249,12 +249,11 @@ async def json_export_loop(
             total_seconds = int(delta.total_seconds())
             mm = total_seconds // 60
             ss = total_seconds % 60
-            merged_affirmation = " ".join(recent_sentences)
             emit_json_line(
                 {
                     "personne": personne,
                     "question_posee": question_posee,
-                    "affirmation": merged_affirmation,
+                    "affirmation": sentence,
                     "affirmation_courante": sentence,
                     "metadata": {
                         "source_video": source_video,
@@ -343,7 +342,7 @@ def parse_args() -> argparse.Namespace:
         "--recent-window",
         type=int,
         default=3,
-        help="Nombre de phrases completes recentes fusionnees dans `affirmation`",
+        help="Option legacy: la sortie JSON n'emet plus qu'une phrase complete par ligne",
     )
     parser.add_argument(
         "--output-jsonl",

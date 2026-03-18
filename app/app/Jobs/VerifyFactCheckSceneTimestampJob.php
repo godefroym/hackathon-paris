@@ -23,6 +23,10 @@ class VerifyFactCheckSceneTimestampJob implements ShouldQueue
      */
     public function handle(ObsSceneSwitcher $obsSceneSwitcher): void
     {
+        if (config('obs.persist_fact_check_scene', true)) {
+            return;
+        }
+
         $latestSwitchAtMs = (int) $this->cache()->get($this->lastSwitchAtCacheKey(), 0);
 
         if ($latestSwitchAtMs !== $this->expectedSwitchAtMs) {

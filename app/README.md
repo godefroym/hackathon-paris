@@ -3,7 +3,14 @@
 This project exposes a fact-check streaming endpoint:
 
 - `POST /api/stream/fact-check`
+- `GET /api/stream/fact-check/latest`
 - Base URL: `http://localhost:8000`
+
+Overlay routes for OBS:
+
+- `http://localhost:8000/overlays/fact-check` -> new stacked persistent overlay (default)
+- `http://localhost:8000/overlays/fact-check-2` -> same new stacked overlay
+- `http://localhost:8000/overlays/fact-check-classic` -> previous single-card overlay
 
 ## HTTPie examples
 
@@ -38,4 +45,5 @@ http POST http://localhost:8000/api/stream/fact-check \
 
 - The endpoint expects JSON and returns JSON.
 - If OBS scene switching fails, the API responds with `502` and `code: "obs_switch_failed"`.
+- By default, the OBS fact-check scene now stays active (`OBS_PERSIST_FACT_CHECK_SCENE=true`).
 - Run the app first (for example via your usual local dev command) before running these checks.

@@ -13,6 +13,9 @@ export interface FactCheckPayload {
   }
   overall_verdict: string
   scene: string
+  switched_at_ms: number
+  switched_at: string | null
+  clear: boolean
 }
 
 export type FactCheckEventPayload = Partial<FactCheckPayload>
@@ -27,6 +30,9 @@ export const emptyFactCheckPayload: FactCheckPayload = {
   },
   overall_verdict: '',
   scene: '',
+  switched_at_ms: 0,
+  switched_at: null,
+  clear: false,
 }
 
 export function normalizeFactCheckPayload(event: FactCheckEventPayload): FactCheckPayload {
@@ -40,5 +46,8 @@ export function normalizeFactCheckPayload(event: FactCheckEventPayload): FactChe
     },
     overall_verdict: event.overall_verdict ?? '',
     scene: event.scene ?? '',
+    switched_at_ms: event.switched_at_ms ?? 0,
+    switched_at: event.switched_at ?? null,
+    clear: event.clear ?? false,
   }
 }

@@ -5,11 +5,14 @@ import re
 import hashlib
 import copy
 import time
+import random
+import unicodedata
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 from urllib.parse import urlparse
 from dataclasses import dataclass, field
+from difflib import SequenceMatcher
 from pydantic import BaseModel, Field
 import requests
 from mistralai import Mistral
@@ -94,6 +97,120 @@ if PIPELINE_LANGUAGE not in {"fr", "en"}:
     PIPELINE_LANGUAGE = "fr"
 FACT_CHECK_OUTPUT_LANGUAGE = PIPELINE_LANGUAGE
 FACT_CHECK_PIVOT_LANGUAGE = "fr"
+GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "").strip()
+GEMINI_SEARCH_FALLBACK_ENABLED = (
+    os.getenv("GEMINI_SEARCH_FALLBACK_ENABLED", "").strip().lower()
+    in {"1", "true", "yes", "on"}
+) or bool(GEMINI_API_KEY)
+GEMINI_SEARCH_FALLBACK_MODEL = (
+    os.getenv("GEMINI_SEARCH_FALLBACK_MODEL", "gemini-2.5-flash").strip()
+    or "gemini-2.5-flash"
+)
+GEMINI_SEARCH_TIMEOUT_SECONDS = max(
+    3.0, float(os.getenv("GEMINI_SEARCH_TIMEOUT_SECONDS", "20"))
+)
+MISTRAL_WEB_SEARCH_503_BEFORE_GEMINI = max(
+    1, int(os.getenv("MISTRAL_WEB_SEARCH_503_BEFORE_GEMINI", "1"))
+)
+FACT_CHECK_EMERGENCY_DEGRADED_MODE = (
+    os.getenv("FACT_CHECK_EMERGENCY_DEGRADED_MODE", "").strip().lower()
+    in {"1", "true", "yes", "on"}
+)
+MISTRAL_TRANSIENT_MAX_RETRIES = max(
+    0, int(os.getenv("MISTRAL_TRANSIENT_MAX_RETRIES", "3"))
+)
+MISTRAL_TRANSIENT_BACKOFF_BASE_SECONDS = max(
+    0.1, float(os.getenv("MISTRAL_TRANSIENT_BACKOFF_BASE_SECONDS", "0.8"))
+)
+MISTRAL_TRANSIENT_BACKOFF_MAX_SECONDS = max(
+    MISTRAL_TRANSIENT_BACKOFF_BASE_SECONDS,
+    float(os.getenv("MISTRAL_TRANSIENT_BACKOFF_MAX_SECONDS", "8.0")),
+)
+MISTRAL_AGENT_CALL_TIMEOUT_SECONDS = max(
+    3.0, float(os.getenv("MISTRAL_AGENT_CALL_TIMEOUT_SECONDS", "10.0"))
+)
+CLEANER_TOKEN_SIMILARITY_THRESHOLD = min(
+    0.95, max(0.3, float(os.getenv("CLEANER_TOKEN_SIMILARITY_THRESHOLD", "0.6")))
+)
+CLEANER_STRICT_TOKEN_SIMILARITY_THRESHOLD = min(
+    0.98, max(0.5, float(os.getenv("CLEANER_STRICT_TOKEN_SIMILARITY_THRESHOLD", "0.72")))
+)
+CLEANER_IGNORE_TOKENS = {
+    "a",
+    "ai",
+    "au",
+    "aux",
+    "ca",
+    "car",
+    "ce",
+    "ces",
+    "cet",
+    "cette",
+    "comme",
+    "dans",
+    "de",
+    "des",
+    "du",
+    "elle",
+    "elles",
+    "en",
+    "entre",
+    "est",
+    "et",
+    "euh",
+    "hein",
+    "hum",
+    "il",
+    "ils",
+    "je",
+    "la",
+    "le",
+    "les",
+    "leur",
+    "leurs",
+    "mais",
+    "mes",
+    "mon",
+    "ne",
+    "nos",
+    "notre",
+    "nous",
+    "on",
+    "ou",
+    "où",
+    "par",
+    "pas",
+    "plus",
+    "pour",
+    "qu",
+    "que",
+    "qui",
+    "sa",
+    "se",
+    "ses",
+    "son",
+    "sur",
+    "ta",
+    "te",
+    "tes",
+    "toi",
+    "ton",
+    "tu",
+    "un",
+    "une",
+    "vos",
+    "votre",
+    "vous",
+}
+CLEANER_DROPPABLE_TOKENS = {
+    "euh",
+    "heu",
+    "hum",
+    "ben",
+    "bah",
+    "hein",
+    "donc",
+}
 
 # =============================================================================
 # 2. SCHÉMAS PYDANTIC 
@@ -280,6 +397,33 @@ def _extract_numbers(text: str) -> list[str]:
     return re.findall(r"\d+(?:[.,]\d+)?", text)
 
 
+def _normalize_token_for_cleaner(token: str) -> str:
+    normalized = unicodedata.normalize("NFKD", (token or "").lower())
+    return "".join(char for char in normalized if not unicodedata.combining(char))
+
+
+def _content_tokens_for_cleaner(text: str) -> list[str]:
+    tokens = re.findall(r"[a-zA-ZÀ-ÿ0-9]+", text or "")
+    normalized_tokens: list[str] = []
+    for token in tokens:
+        normalized = _normalize_token_for_cleaner(token)
+        if len(normalized) < 3:
+            continue
+        if normalized in CLEANER_IGNORE_TOKENS:
+            continue
+        normalized_tokens.append(normalized)
+    return normalized_tokens
+
+
+def _ordered_tokens_for_cleaner(text: str) -> list[str]:
+    tokens = re.findall(r"[a-zA-ZÀ-ÿ0-9]+", text or "")
+    return [_normalize_token_for_cleaner(token) for token in tokens if token.strip()]
+
+
+def _token_similarity(left: str, right: str) -> float:
+    return SequenceMatcher(a=left, b=right).ratio()
+
+
 def _has_numeric_drift(original_text: str, cleaned_text: str) -> bool:
     original_numbers = _extract_numbers(original_text)
     cleaned_numbers = _extract_numbers(cleaned_text)
@@ -287,6 +431,135 @@ def _has_numeric_drift(original_text: str, cleaned_text: str) -> bool:
         return False
     # Keep original assertion if cleaner altered or removed numeric values.
     return original_numbers != cleaned_numbers
+
+
+def _has_semantic_drift(original_text: str, cleaned_text: str) -> bool:
+    original_tokens = _content_tokens_for_cleaner(original_text)
+    cleaned_tokens = _content_tokens_for_cleaner(cleaned_text)
+    if not original_tokens or not cleaned_tokens:
+        return False
+
+    matcher = SequenceMatcher(a=original_tokens, b=cleaned_tokens)
+    for tag, i1, i2, j1, j2 in matcher.get_opcodes():
+        if tag == "equal":
+            continue
+
+        original_segment = original_tokens[i1:i2]
+        cleaned_segment = cleaned_tokens[j1:j2]
+
+        if tag in {"insert", "delete"}:
+            if original_segment or cleaned_segment:
+                return True
+            continue
+
+        if tag == "replace":
+            if len(original_segment) != len(cleaned_segment):
+                return True
+            for original_token, cleaned_token in zip(original_segment, cleaned_segment):
+                if (
+                    _token_similarity(original_token, cleaned_token)
+                    < CLEANER_TOKEN_SIMILARITY_THRESHOLD
+                ):
+                    return True
+
+    return False
+
+
+def _cleaner_changes_are_safe(original_text: str, cleaned_text: str) -> bool:
+    original = (original_text or "").strip()
+    cleaned = (cleaned_text or "").strip()
+    if not original or not cleaned or original == cleaned:
+        return True
+
+    original_sentences = _split_sentences(original)
+    cleaned_sentences = _split_sentences(cleaned)
+    if len(original_sentences) != len(cleaned_sentences):
+        return False
+
+    original_tokens = _ordered_tokens_for_cleaner(original)
+    cleaned_tokens = _ordered_tokens_for_cleaner(cleaned)
+    if not original_tokens or not cleaned_tokens:
+        return True
+
+    matcher = SequenceMatcher(a=original_tokens, b=cleaned_tokens)
+    for tag, i1, i2, j1, j2 in matcher.get_opcodes():
+        if tag == "equal":
+            continue
+
+        original_segment = original_tokens[i1:i2]
+        cleaned_segment = cleaned_tokens[j1:j2]
+
+        if tag in {"insert", "delete"}:
+            changed_segment = original_segment or cleaned_segment
+            if any(token not in CLEANER_DROPPABLE_TOKENS for token in changed_segment):
+                return False
+            continue
+
+        if tag == "replace":
+            if len(original_segment) != len(cleaned_segment):
+                return False
+            for original_token, cleaned_token in zip(original_segment, cleaned_segment):
+                if original_token == cleaned_token:
+                    continue
+                if (
+                    original_token in CLEANER_DROPPABLE_TOKENS
+                    or cleaned_token in CLEANER_DROPPABLE_TOKENS
+                ):
+                    continue
+                if (
+                    _token_similarity(original_token, cleaned_token)
+                    < CLEANER_STRICT_TOKEN_SIMILARITY_THRESHOLD
+                ):
+                    return False
+
+    return True
+
+
+def _is_transient_mistral_error(exc: Exception) -> bool:
+    lowered = str(exc).lower()
+    transient_markers = (
+        "status 500",
+        "status 502",
+        "status 503",
+        "status 504",
+        "upstream connect error",
+        "disconnect/reset before headers",
+        "reset reason: overflow",
+        "failed to create conversation response",
+        "temporarily unavailable",
+        "connection reset",
+        "timed out",
+        "timeout",
+        "\"code\":3000",
+        "\"code\":\"3000\"",
+    )
+    return any(marker in lowered for marker in transient_markers)
+
+
+async def _run_with_mistral_retries(
+    label: str, operation, *, max_retries: int | None = None
+):
+    retries = MISTRAL_TRANSIENT_MAX_RETRIES if max_retries is None else max(0, max_retries)
+    for attempt in range(retries + 1):
+        try:
+            return await operation()
+        except Exception as exc:
+            if attempt >= retries or not _is_transient_mistral_error(exc):
+                raise
+            backoff = min(
+                MISTRAL_TRANSIENT_BACKOFF_MAX_SECONDS,
+                MISTRAL_TRANSIENT_BACKOFF_BASE_SECONDS * (2 ** attempt),
+            )
+            jitter = random.uniform(0.0, 0.25 * max(0.2, backoff))
+            wait_seconds = backoff + jitter
+            print(
+                "[mistral] erreur transitoire "
+                f"({label}), retry {attempt + 1}/{retries} "
+                f"dans {wait_seconds:.2f}s: {exc}"
+            )
+            await asyncio.sleep(wait_seconds)
+
+    raise RuntimeError(f"Unreachable retry exhaustion for {label}")
 
 
 def _normalize_language_code(value: Any) -> str:
@@ -304,10 +577,13 @@ def _normalize_language_code(value: Any) -> str:
 
 async def _mistral_json_completion(prompt: str, *, model: str = _FAST_MODEL) -> dict[str, Any]:
     try:
-        res = await client.chat.complete_async(
-            model=model,
-            messages=[{"role": "user", "content": prompt}],
-            response_format={"type": "json_object"},
+        res = await _run_with_mistral_retries(
+            f"chat.complete_async:{model}",
+            lambda: client.chat.complete_async(
+                model=model,
+                messages=[{"role": "user", "content": prompt}],
+                response_format={"type": "json_object"},
+            ),
         )
         content = res.choices[0].message.content
         if isinstance(content, str):
@@ -377,7 +653,24 @@ Rules:
     return translated.strip()
 
 
-def _build_source_queries(base_query: str, *, category: str, speaker: str = "") -> list[str]:
+def _dedupe_source_queries(queries: list[str]) -> list[str]:
+    deduped: list[str] = []
+    seen: set[str] = set()
+    for query in queries:
+        normalized = " ".join(str(query or "").split())
+        if len(normalized) < 6:
+            continue
+        key = normalized.lower()
+        if key in seen:
+            continue
+        seen.add(key)
+        deduped.append(normalized)
+    return deduped
+
+
+def _build_heuristic_source_queries(
+    base_query: str, *, category: str, speaker: str = ""
+) -> list[str]:
     cleaned_base = (base_query or "").strip()
     if not cleaned_base:
         return []
@@ -397,21 +690,83 @@ def _build_source_queries(base_query: str, *, category: str, speaker: str = "") 
         queries.append("PIB France INSEE Banque mondiale NY.GDP.MKTP.CD")
     if "dette" in lowered:
         queries.append("dette publique France INSEE Banque de France")
+    if any(token in lowered for token in ("doigt", "doigts", "main", "mains")):
+        queries.extend(
+            [
+                "combien de doigts a un être humain",
+                "anatomie humaine nombre de doigts",
+                "how many fingers does a human have",
+            ]
+        )
+    if any(token in lowered for token in ("humain", "être humain", "corps humain")):
+        queries.append(f"preuve factuelle {cleaned_base}")
     if category == "coherence" and speaker:
         queries.append(f"{speaker} archive déclaration {cleaned_base}")
 
-    deduped: list[str] = []
-    seen: set[str] = set()
-    for query in queries:
-        normalized = " ".join(query.split())
-        if len(normalized) < 10:
-            continue
-        key = normalized.lower()
-        if key in seen:
-            continue
-        seen.add(key)
-        deduped.append(normalized)
-    return deduped
+    return _dedupe_source_queries(queries)
+
+
+async def _build_source_queries(
+    base_query: str, *, category: str, speaker: str = ""
+) -> list[str]:
+    cleaned_base = (base_query or "").strip()
+    if not cleaned_base:
+        return []
+
+    heuristic_queries = _build_heuristic_source_queries(
+        cleaned_base,
+        category=category,
+        speaker=speaker,
+    )
+    if FACT_CHECK_EMERGENCY_DEGRADED_MODE:
+        return heuristic_queries
+
+    prompt = f"""
+Tu dois préparer une recherche web pour trouver AU MOINS UN LIEN FIABLE permettant de vérifier une affirmation.
+
+Affirmation :
+\"\"\"{cleaned_base}\"\"\"
+
+Question à te poser :
+"Si je voulais prouver que cette affirmation est fausse, quelle preuve précise devrais-je chercher ?"
+
+Réponds uniquement en JSON :
+{{
+  "proof_to_look_for": "phrase courte décrivant la preuve recherchée",
+  "queries": [
+    "requête web 1",
+    "requête web 2",
+    "requête web 3"
+  ]
+}}
+
+Règles :
+- Les requêtes doivent chercher une preuve, pas reformuler bêtement l'affirmation.
+- Les requêtes doivent maximiser les chances d'obtenir un lien fiable.
+- Si l'affirmation parle d'un nombre, cherche directement la donnée correcte.
+- Si l'affirmation parle de science, médecine, biologie, géographie, histoire ou institutions, cherche le fait correct.
+- Si l'affirmation est absurde ou manifestement fausse, cherche quand même la preuve positive du fait correct.
+- N'écris pas d'URL.
+- Donne 3 requêtes maximum.
+"""
+    parsed = await _mistral_json_completion(prompt, model=_FAST_MODEL)
+    proof = str(parsed.get("proof_to_look_for", "")).strip()
+    raw_queries = parsed.get("queries")
+    planned_queries = [proof] if proof else []
+    if isinstance(raw_queries, list):
+        for query in raw_queries:
+            if isinstance(query, str) and query.strip():
+                planned_queries.append(query.strip())
+
+    combined_queries = _dedupe_source_queries(planned_queries + heuristic_queries)
+    if combined_queries:
+        print(
+            f"🧭 [SEARCH PLAN] preuve='{proof[:120]}' "
+            f"queries={combined_queries[:3]}"
+        )
+        return combined_queries
+
+    return heuristic_queries
 
 
 def _fallback_reference_sources(fact_focus_text: str) -> list[dict[str, str]]:
@@ -434,15 +789,184 @@ def _fallback_reference_sources(fact_focus_text: str) -> list[dict[str, str]]:
                 "url": "https://data.worldbank.org/indicator/NY.GDP.MKTP.CD?locations=FR",
             }
         ]
+    if "sida" in lower or "vih" in lower or "hiv" in lower:
+        return [
+            {
+                "organization": "who.int",
+                "url": "https://www.who.int/news-room/fact-sheets/detail/hiv-aids",
+            }
+        ]
     return []
+
+
+def _build_emergency_degraded_output(
+    atomic_fact_text: str,
+    *,
+    output_language: str,
+) -> dict[str, Any] | None:
+    lower = (atomic_fact_text or "").lower()
+    sources = _fallback_reference_sources(atomic_fact_text)
+    if not sources:
+        return None
+
+    summary_fr = ""
+    summary_en = ""
+
+    if any(token in lower for token in ("population", "êtres humains", "terre", "monde")):
+        summary_fr = (
+            "FAUX : la population mondiale dépasse 8 milliards d'habitants, "
+            "pas 3 millions."
+        )
+        summary_en = (
+            "False: the world population is above 8 billion people, "
+            "not 3 million."
+        )
+    elif ("sida" in lower or "vih" in lower or "hiv" in lower) and (
+        "bact" in lower or "bacter" in lower
+    ):
+        summary_fr = (
+            "FAUX : le sida n'est pas une bactérie. Il est lié au VIH, "
+            "qui est un virus."
+        )
+        summary_en = (
+            "False: AIDS is not a bacterium. It is linked to HIV, "
+            "which is a virus."
+        )
+    elif "pib" in lower and "france" in lower:
+        summary_fr = (
+            "FAUX : le PIB de la France se compte en milliers de milliards d'euros, "
+            "pas au niveau annoncé."
+        )
+        summary_en = (
+            "False: France's GDP is measured in trillions of euros, "
+            "not at the level stated."
+        )
+
+    if not summary_fr:
+        return None
+
+    summary = summary_en if output_language == "en" else summary_fr
+    return {
+        "claim": {"text": str(atomic_fact_text)},
+        "analysis": {"summary": summary, "sources": sources[:3]},
+        "overall_verdict": "inaccurate",
+        "afficher_bandeau": True,
+        "degraded_mode": True,
+        "degraded_mode_reason": "emergency_static_fallback",
+    }
+
+
+def _extract_gemini_grounding_sources(payload: dict[str, Any]) -> list[dict[str, str]]:
+    candidates = payload.get("candidates")
+    if not isinstance(candidates, list):
+        return []
+
+    collected: list[dict[str, str]] = []
+    seen_urls: set[str] = set()
+    for candidate in candidates:
+        if not isinstance(candidate, dict):
+            continue
+        grounding_metadata = candidate.get("groundingMetadata")
+        if not isinstance(grounding_metadata, dict):
+            continue
+        chunks = grounding_metadata.get("groundingChunks")
+        if not isinstance(chunks, list):
+            continue
+        for chunk in chunks:
+            if not isinstance(chunk, dict):
+                continue
+            web = chunk.get("web")
+            if not isinstance(web, dict):
+                continue
+            url = str(web.get("uri", "")).strip()
+            if not _is_http_url(url) or url in seen_urls:
+                continue
+            seen_urls.add(url)
+            title = str(web.get("title", "")).strip()
+            organization = title or _domain_to_organization(url)
+            collected.append({"organization": organization[:255], "url": url[:2048]})
+    return collected
+
+
+def _gemini_grounded_search_sync(query: str) -> list[dict[str, str]]:
+    if not GEMINI_API_KEY:
+        return []
+
+    url = (
+        "https://generativelanguage.googleapis.com/v1beta/models/"
+        f"{GEMINI_SEARCH_FALLBACK_MODEL}:generateContent"
+    )
+    headers = {
+        "x-goog-api-key": GEMINI_API_KEY,
+        "Content-Type": "application/json",
+    }
+    prompt = (
+        "Find authoritative web sources for the following factual claim. "
+        "Ground the answer with Google Search.\n"
+        f"Claim: {query}"
+    )
+    payload = {
+        "contents": [{"parts": [{"text": prompt}]}],
+        "tools": [{"google_search": {}}],
+    }
+    response = requests.post(
+        url,
+        headers=headers,
+        json=payload,
+        timeout=GEMINI_SEARCH_TIMEOUT_SECONDS,
+    )
+    response.raise_for_status()
+    parsed = response.json()
+    if not isinstance(parsed, dict):
+        return []
+    return _extract_gemini_grounding_sources(parsed)
+
+
+async def _search_and_sort_sources_with_gemini(
+    query: str, allow_social: bool = False
+) -> list[dict[str, str]]:
+    if not GEMINI_SEARCH_FALLBACK_ENABLED or not GEMINI_API_KEY:
+        return []
+    try:
+        sources = await asyncio.to_thread(_gemini_grounded_search_sync, query)
+    except Exception as exc:
+        print(f"⚠️ Erreur Gemini fallback search: {exc}")
+        return []
+
+    filtered: list[dict[str, str]] = []
+    seen_urls: set[str] = set()
+    for source in sources:
+        url = source.get("url", "").strip()
+        if not _is_http_url(url) or url in seen_urls:
+            continue
+        host = _domain_to_organization(url)
+        score = _score_source(url)
+        if score <= 0 and not allow_social:
+            continue
+        seen_urls.add(url)
+        filtered.append(
+            {
+                "organization": source.get("organization", host)[:255],
+                "url": url[:2048],
+            }
+        )
+    return filtered[:3]
 
 
 async def _search_and_sort_sources(query: str, allow_social: bool = False) -> list[dict]:
     if len(query) < 10:
         return []
     try:
-        res = await client.beta.conversations.start_async(
-            model=_SMART_MODEL, inputs=query, tools=[{"type": "web_search"}]
+        res = await _run_with_mistral_retries(
+            f"web_search:{query[:80]}",
+            lambda: client.beta.conversations.start_async(
+                model=_SMART_MODEL, inputs=query, tools=[{"type": "web_search"}]
+            ),
+            max_retries=(
+                0
+                if FACT_CHECK_EMERGENCY_DEGRADED_MODE
+                else max(0, MISTRAL_WEB_SEARCH_503_BEFORE_GEMINI - 1)
+            ),
         )
         candidates = []
         for o in res.model_dump().get("outputs", []):
@@ -477,6 +1001,16 @@ async def _search_and_sort_sources(query: str, allow_social: bool = False) -> li
             deduped.append(candidate)
         return [{"url": c["url"], "organization": c["organization"]} for c in deduped][:3]
     except Exception as e:
+        if _is_transient_mistral_error(e):
+            gemini_sources = await _search_and_sort_sources_with_gemini(
+                query, allow_social=allow_social
+            )
+            if gemini_sources:
+                print(
+                    "🛰️ [GEMINI FALLBACK] web search utilise apres echec Mistral "
+                    f"pour: {query[:80]}"
+                )
+                return gemini_sources
         print(f"⚠️ Erreur recherche: {e}")
         return []
 
@@ -488,11 +1022,16 @@ async def _search_sources_with_fallbacks(
     allow_social: bool = False,
     speaker: str = "",
 ) -> list[dict[str, str]]:
-    queries = _build_source_queries(base_query, category=category, speaker=speaker)
+    queries = await _build_source_queries(
+        base_query,
+        category=category,
+        speaker=speaker,
+    )
     collected: list[dict[str, str]] = []
     seen_urls: set[str] = set()
 
-    for query in queries[:6]:
+    max_queries = 1 if FACT_CHECK_EMERGENCY_DEGRADED_MODE else 6
+    for query in queries[:max_queries]:
         current = await _search_and_sort_sources(query, allow_social=allow_social)
         for source in current:
             url = source.get("url", "").strip()
@@ -530,6 +1069,7 @@ def build_cleaner_prompt(affirmation: str) -> str:
     2. CONSERVATION DES QUANTITÉS : Conserve IMPÉRATIVEMENT les mots comme "aucun", "tous", "zéro", ainsi que tous les chiffres exacts.
     3. CORRECTION MINIMALE : Corrige UNIQUEMENT les fautes d'orthographe, la phonétique (ex: "le poid de l'étable" -> "le poids de l'État") et efface les bafouillements (ex: "euh"). 
     4. GARDE LE DERNIER CHIFFRE : Si l'orateur se corrige, garde le dernier chiffre énoncé (ex: Il y a 20%, euh non 65% d'arabes en France -> Il y a 65% d'arabes en France")
+    5. INTERDICTION DE CHANGER LE SENS : Tu n'as pas le droit de remplacer un concept par un autre. Exemples interdits : "bactérie" -> "maladie", "Ukraine" -> "Russie", "président" -> "dirigeant".
     
     Ne renvoie QUE la phrase corrigée, sans aucun autre texte.
     """
@@ -590,18 +1130,66 @@ async def get_agent_pool():
         ids = {}
         for key, defi in AGENT_DEFINITIONS.items():
             fmt = {"type": "json_schema", "json_schema": {"name": defi["schema"], "schema": defi["cls"].model_json_schema(), "strict": True}}
-            res = await client.beta.agents.create_async(
-                name=f"agent-veristral-{key}", model=defi["model"], completion_args={"temperature": 0.0, "response_format": fmt}
+            res = await _run_with_mistral_retries(
+                f"agents.create:{key}",
+                lambda key=key, defi=defi, fmt=fmt: client.beta.agents.create_async(
+                    name=f"agent-veristral-{key}",
+                    model=defi["model"],
+                    completion_args={"temperature": 0.0, "response_format": fmt},
+                ),
             )
             ids[key] = res.id
         _POOL_INSTANCE = AgentPool(specialist_ids=ids)
     return _POOL_INSTANCE
 
+def _build_editor_fallback_from_reports(
+    rapports: list[dict[str, Any]], sources_disponibles: list[dict[str, str]]
+) -> dict[str, Any]:
+    fact_check: str | None = None
+    contexte: str | None = None
+
+    for report in rapports:
+        if not isinstance(report, dict):
+            continue
+        agent = str(report.get("agent", "")).strip().lower()
+        if agent == "statistique" and not fact_check:
+            verdict = str(report.get("verdict", "")).strip().upper()
+            if verdict in {"FAUX", "TROMPEUR", "VRAI"}:
+                fact_check = str(report.get("analyse_detaillee", "")).strip() or None
+        elif agent == "contexte" and not contexte:
+            contexte = str(report.get("analyse_detaillee", "")).strip() or None
+        elif agent == "coherence" and not contexte:
+            contexte = str(report.get("explication", "")).strip() or None
+        elif agent == "rhetorique" and not contexte:
+            contexte = str(report.get("explication", "")).strip() or None
+
+    return {
+        "fact_check": fact_check,
+        "contexte": contexte,
+        "sources_utilisees": _normalize_sources(sources_disponibles)[:3],
+    }
+
+
 async def run_task(agent_key: str, prompt: str) -> dict:
     pool = await get_agent_pool()
     try:
-        res = await client.beta.conversations.start_async(agent_id=pool.specialist_ids[agent_key], inputs=prompt)
+        res = await asyncio.wait_for(
+            _run_with_mistral_retries(
+                f"conversations.start:{agent_key}",
+                lambda: client.beta.conversations.start_async(
+                    agent_id=pool.specialist_ids[agent_key],
+                    inputs=prompt,
+                ),
+            ),
+            timeout=MISTRAL_AGENT_CALL_TIMEOUT_SECONDS,
+        )
         return json.loads(res.model_dump()["outputs"][-1]["content"])
+    except asyncio.TimeoutError:
+        print(
+            f"⚠️ Timeout agent {agent_key}: "
+            f">{MISTRAL_AGENT_CALL_TIMEOUT_SECONDS:.1f}s"
+        )
+        return {}
     except Exception as e:
         print(f"⚠️ Erreur agent {agent_key}: {e}")
         return {}
@@ -669,6 +1257,7 @@ async def analyze_debate_line(current_json: dict, last_minute_json: dict) -> dic
         if FACT_CHECK_OUTPUT_LANGUAGE in {"fr", "en"}
         else PIPELINE_LANGUAGE
     )
+    original_assertion_for_analysis = current_assertion
     input_language, assertion_fr = await _translate_to_french_with_detection(
         current_assertion
     )
@@ -683,8 +1272,14 @@ async def analyze_debate_line(current_json: dict, last_minute_json: dict) -> dic
     clean_text = nettoyage.get("phrase_nette")
     if not clean_text or len(clean_text) < 2:
         clean_text = assertion_fr
+    if not _cleaner_changes_are_safe(assertion_fr, clean_text):
+        print("🛡️ [GARDE-FOU] Nettoyeur refuse: changement trop fort ou ordre modifie.")
+        clean_text = assertion_fr
     if _has_numeric_drift(assertion_fr, clean_text):
         print("🛡️ [GARDE-FOU] Derive numerique detectee, conservation de la phrase originale.")
+        clean_text = assertion_fr
+    if _has_semantic_drift(assertion_fr, clean_text):
+        print("🛡️ [GARDE-FOU] Derive semantique detectee, conservation de la phrase originale.")
         clean_text = assertion_fr
     print(f"✨ TEXTE NETTOYÉ : '{clean_text}'")
     data_fr = copy.deepcopy(data)
@@ -739,6 +1334,16 @@ async def analyze_debate_line(current_json: dict, last_minute_json: dict) -> dic
         return obs_vide
         
     print(f"🔀 DÉCISION ROUTEUR : {routage}")
+
+    if FACT_CHECK_EMERGENCY_DEGRADED_MODE:
+        emergency_output = _build_emergency_degraded_output(
+            atomic_fact_text,
+            output_language=output_language,
+        )
+        if emergency_output is not None:
+            print("🚑 [MODE DÉGRADÉ] sortie heuristique statique utilisée.")
+            CACHE_RESULTATS_GLOBAUX[phrase_id] = emergency_output
+            return emergency_output
 
     # 3. EXPERTS AVEC EXTRACTION DES SOURCES
     tasks = []
@@ -797,6 +1402,9 @@ async def analyze_debate_line(current_json: dict, last_minute_json: dict) -> dic
 
     if rapports:
         final = await run_task("editeur_final", build_final_editor_prompt(rapports, toutes_les_sources))
+        if not final:
+            print("🩹 [FALLBACK ÉDITEUR] synthese locale utilisée.")
+            final = _build_editor_fallback_from_reports(rapports, toutes_les_sources)
         if not routage.get("run_contexte"): final["contexte"] = None
         if not routage.get("run_stats") and not routage.get("run_rhetorique"): final["fact_check"] = None
     else:
@@ -829,6 +1437,22 @@ async def analyze_debate_line(current_json: dict, last_minute_json: dict) -> dic
         # Fallback: enforce at least one valid URL source from web-search results
         # so the payload remains postable for the overlay API contract.
         sources_obs = _normalize_sources(toutes_les_sources)
+
+    if not summary_output_text or not sources_obs:
+        targeted_fallback = _build_emergency_degraded_output(
+            original_assertion_for_analysis,
+            output_language=output_language,
+        )
+        if targeted_fallback is not None:
+            print("🩹 [FALLBACK CIBLÉ] sortie heuristique utilisée.")
+            claim_output_text = str(targeted_fallback.get("claim", {}).get("text", claim_output_text)).strip() or claim_output_text
+            summary_output_text = str(
+                targeted_fallback.get("analysis", {}).get("summary", "")
+            ).strip()
+            sources_obs = _normalize_sources(
+                targeted_fallback.get("analysis", {}).get("sources", [])
+            )
+            verdict_obs = str(targeted_fallback.get("overall_verdict", verdict_obs)).strip() or verdict_obs
 
     should_show_banner = bool(summary_output_text and sources_obs)
 

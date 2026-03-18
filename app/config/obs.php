@@ -19,4 +19,9 @@ return [
     ],
 
     'cooldown_seconds' => (int) env('OBS_COOLDOWN_SECONDS', 5),
+
+    'persist_fact_check_scene' => filter_var(
+        env('OBS_PERSIST_FACT_CHECK_SCENE', true),
+        FILTER_VALIDATE_BOOL,
+    ),
 ];
