@@ -3,6 +3,9 @@ set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 VENV_PATH="$ROOT_DIR/ingestion/.venv/bin/activate"
+if [[ ! -f "$VENV_PATH" ]]; then
+  VENV_PATH="$ROOT_DIR/.venv/bin/activate"
+fi
 VIDEO_DELAY_SECONDS="${VIDEO_DELAY_SECONDS:-30}"
 MAX_WAIT_NEXT_PHRASE_SECONDS="${MAX_WAIT_NEXT_PHRASE_SECONDS:-1.0}"
 ANALYSIS_TIMEOUT_SECONDS="${ANALYSIS_TIMEOUT_SECONDS:-30}"

@@ -6,10 +6,10 @@ This folder contains the Temporal wiring for the real-time transcript pipeline:
 
 - `debate_workflow.py`: receives two JSON payloads and calls `analyze_debate_line`.
 - `debate_worker.py`: worker for task queue `debate-json-task-queue`, registers
-  `analyze_debate_line` from `activities.py`.
+  `analyze_debate_line` from `activities_emma.py`.
 - `debate_jsonl_to_temporal.py`: reads JSONL (file or stdin) and starts one
   workflow per line.
-- `activities.py`: after analysis, posts workflow result to
+- `activities_emma.py`: after analysis, posts workflow result to
   `http://localhost:8000/api/stream/fact-check` (configurable via
   `FACT_CHECK_POST_URL`).
 
@@ -35,7 +35,7 @@ POST payload sent by the workflow:
 Main timing variables (in `cle.env` or CLI):
 - `VIDEO_STREAM_DELAY_SECONDS` (default: 30)
 - `FACT_CHECK_ANALYSIS_TIMEOUT_SECONDS` (default: 30)
-- `FACT_CHECK_ACTIVITY_IMPL` (`local` or `emma`, default: `local`)
+- `FACT_CHECK_ACTIVITY_IMPL` (`emma`, default: `emma`)
 
 ### Run
 
@@ -49,7 +49,7 @@ cd ..
 The stack now includes namespace creation (`temporal-create-namespace`) before
 starting `workflows-worker`.
 
-Create `cle.env` at repo root (required by `activities.py`):
+Create `cle.env` at repo root (required by `activities_emma.py`):
 
 ```bash
 cd ..
@@ -101,10 +101,4 @@ Useful commands:
 ./scripts/run_stack.sh logs workflows-worker
 ```
 
-Switch worker implementation to Emma's activities for tests:
-
-```bash
-cd ..
-FACT_CHECK_ACTIVITY_IMPL=emma docker compose up -d --build workflows-worker
-docker compose logs --tail=40 workflows-worker
-```
+Worker uses `activities_emma.py` by default.

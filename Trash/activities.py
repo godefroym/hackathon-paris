@@ -11,6 +11,7 @@ import requests
 from temporalio import activity
 from mistralai import Mistral
 from dotenv import load_dotenv
+from transcript_archive import archive_transcript_entry_payload
 
 # --- ASTUCE POUR LE CHEMIN DES CLÉS ---
 # On récupère le chemin du dossier 'workflows'
@@ -1111,3 +1112,8 @@ async def post_fact_check_result(payload: dict) -> dict:
             .replace("+00:00", "Z"),
             "error": str(exc),
         }
+
+
+@activity.defn
+async def archive_transcript_entry(payload: dict) -> dict:
+    return await asyncio.to_thread(archive_transcript_entry_payload, payload)

@@ -17,6 +17,7 @@ from pydantic import BaseModel, Field
 import requests
 from mistralai import Mistral
 from dotenv import load_dotenv
+from transcript_archive import archive_transcript_entry_payload
 
 # --- SÉCURITÉ IMPORTS ---
 try:
@@ -32,21 +33,41 @@ env_path = Path("cle.env").absolute()
 load_dotenv(dotenv_path=env_path, override=True)
 client = Mistral(api_key=os.getenv("MISTRAL_API_KEY"))
 
-try:
-    from activities import (
-        check_next_phrase_self_correction as _local_check_next_phrase_self_correction,
-    )
-except Exception:
-    _local_check_next_phrase_self_correction = None
-
 _FAST_MODEL = "mistral-small-latest"
 _SMART_MODEL = "mistral-medium-latest"
 _BEST_MODEL = "mistral-large-latest"
 
 CACHE_RESULTATS_GLOBAUX = {}
-TIER_1_GOUV = ["gouv.fr", "insee.fr", "senat.fr", "assemblee-nationale.fr", "vie-publique.fr", "data.gouv.fr", "ameli.fr", "inserm.fr","ansm.sante.fr","anses.fr","service-publics.fr","conseil-etat.fr","actu-juridique.fr","banque-france.fr","cnrs.fr","iniria.fr","cea.fr","archives-ouvertes.fr","cnes.fr","techniques-ingenieur.fr"]
-TIER_2_MEDIAS = ["lemonde.fr", "lefigaro.fr", "liberation.fr", "humanite.fr", "marianne.net", "francetvinfo.fr", "radiofrance.fr", "lesechos.fr", "ouest-france.fr", "france24.com", "franceinfo.fr", "20minutes.fr", "actu.orange.fr", "tf1info.fr","lexpress.fr","dalloz-actualite.fr","ofce.sciences-po.fr","75secondes.fr","legifiscal.fr","fr.wikipedia.org","reporterre.net","mouvement-europeen.eu"]
-SOCIAL_BLACKLIST = ["tiktok.com", "facebook.com", "instagram.com", "x.com", "twitter.com", "youtube.com", "linkedin.com", "reddit.com", "pinterest.com", "4chan.org"]
+_SEARCH_QUERY_SEMAPHORE: asyncio.Semaphore | None = None
+
+# --- TIERS fusionnés et complétés pour le pipeline Emma ---
+TIER_1_GOUV = [
+    "gouv.fr", "insee.fr", "ameli.fr", "vie-publique.fr", "senat.fr", "assemblee-nationale.fr", "data.gouv.fr",
+    "inserm.fr", "ansm.sante.fr", "anses.fr", "service-public.fr", "conseil-etat.fr", "actu-juridique.fr",
+    "banque-france.fr", "cnrs.fr", "inria.fr", "cea.fr", "archives-ouvertes.fr", "cnes.fr", "techniques-ingenieur.fr"
+]
+TIER_2_MEDIAS = [
+    "actu.fr", "francebleu.fr", "lemonde.fr", "liberation.fr", "rfi.fr", "lepoint.fr", "ladepeche.fr", "france24.com",
+    "franceculture.fr", "20minutes.fr", "ouest-france.fr", "mediapart.fr", "numerama.com", "lefigaro.fr", "franceinfo.fr",
+    "afp.com", "afp.fr", "sudouest.fr", "lesechos.fr", "marianne.net", "francetvinfo.fr", "radiofrance.fr", "actu.orange.fr",
+    "tf1info.fr", "lexpress.fr", "dalloz-actualite.fr", "ofce.sciences-po.fr", "75secondes.fr", "legifiscal.fr",
+    "fr.wikipedia.org", "reporterre.net", "mouvement-europeen.eu"
+]
+SOCIAL_BLACKLIST = [
+    "tiktok.com", "facebook.com", "instagram.com", "x.com", "twitter.com", "reddit.com", "pinterest.com"
+]
+CORRECTION_MARKERS = [
+    "pardon",
+    "je corrige",
+    "je me corrige",
+    "je me suis trompe",
+    "je me suis trompé",
+    "plutot",
+    "plutôt",
+    "rectification",
+    "en fait",
+    "non",
+]
 NON_FACTUAL_MARKERS = (
     "allo",
     "allô",
@@ -68,14 +89,35 @@ FACT_KEYWORDS = (
     "dette",
     "population",
     "habitants",
-    "terre",
-    "monde",
-    "france",
     "euro",
     "euros",
     "milliard",
     "million",
     "pourcent",
+    "pourcentage",
+    "plus que",
+    "moins que",
+    "supérieur à",
+    "superieur a",
+    "inférieur à",
+    "inferieur a",
+    "augmenté",
+    "augmente",
+    "augmentation",
+    "diminué",
+    "diminue",
+    "diminution",
+    "baissé",
+    "baisse",
+    "hausse",
+    "multiplié par",
+    "multiplie par",
+    "divisé par",
+    "divise par",
+    "moitié",
+    "moitie",
+    "double",
+    "triple",
 )
 FACT_VERBS = (
     " est ",
@@ -89,6 +131,84 @@ FACT_VERBS = (
     " dépasse ",
     " mesure ",
     " vaut ",
+)
+STAT_COMPARISON_MARKERS = (
+    "pourcent",
+    "pourcentage",
+    "plus que",
+    "moins que",
+    "plus de",
+    "moins de",
+    "supérieur à",
+    "superieur a",
+    "inférieur à",
+    "inferieur a",
+    "augmenté",
+    "augmente",
+    "augmentation",
+    "diminué",
+    "diminue",
+    "diminution",
+    "baissé",
+    "baisse",
+    "hausse",
+    "multiplié par",
+    "multiplie par",
+    "divisé par",
+    "divise par",
+    "fois plus",
+    "fois moins",
+    "moitié",
+    "moitie",
+    "double",
+    "triple",
+)
+STRONG_STAT_KEYWORDS = (
+    "pib",
+    "dette",
+    "population",
+    "habitants",
+    "euro",
+    "euros",
+    "milliard",
+    "million",
+    "pourcent",
+    "pourcentage",
+)
+EVENT_KEYWORDS = (
+    "jeux olympiques",
+    "jo ",
+    "olympique",
+    "olympiques",
+    "grève",
+    "greve",
+    "guerre",
+    "manifestation",
+    "loi",
+    "projet de loi",
+    "proposition de loi",
+    "décret",
+    "decret",
+    "réforme",
+    "reforme",
+    "élection",
+    "election",
+    "émeute",
+    "emeute",
+    "attentat",
+    "incendie",
+    "inondation",
+    "séisme",
+    "seisme",
+    "tour de france",
+    "coupe du monde",
+    "championnat",
+    "finale",
+    "match",
+    "crise",
+    "scandale",
+    "attaque",
+    "fait divers",
 )
 
 DEFAULT_FACT_CHECK_POST_URL = "http://localhost:8000/api/stream/fact-check"
@@ -107,10 +227,19 @@ GEMINI_SEARCH_FALLBACK_MODEL = (
     or "gemini-2.5-flash"
 )
 GEMINI_SEARCH_TIMEOUT_SECONDS = max(
-    3.0, float(os.getenv("GEMINI_SEARCH_TIMEOUT_SECONDS", "20"))
+    3.0, float(os.getenv("GEMINI_SEARCH_TIMEOUT_SECONDS", "8"))
 )
 MISTRAL_WEB_SEARCH_503_BEFORE_GEMINI = max(
     1, int(os.getenv("MISTRAL_WEB_SEARCH_503_BEFORE_GEMINI", "1"))
+)
+FACT_CHECK_SEARCH_QUERY_TIMEOUT_SECONDS = max(
+    2.0, float(os.getenv("FACT_CHECK_SEARCH_QUERY_TIMEOUT_SECONDS", "8.0"))
+)
+FACT_CHECK_SEARCH_QUERY_CONCURRENCY = min(
+    2, max(1, int(os.getenv("FACT_CHECK_SEARCH_QUERY_CONCURRENCY", "2")))
+)
+FACT_CHECK_SEARCH_QUERY_MAX_ATTEMPTS = max(
+    1, int(os.getenv("FACT_CHECK_SEARCH_QUERY_MAX_ATTEMPTS", "3"))
 )
 FACT_CHECK_EMERGENCY_DEGRADED_MODE = (
     os.getenv("FACT_CHECK_EMERGENCY_DEGRADED_MODE", "").strip().lower()
@@ -271,11 +400,37 @@ def _score_source(url: str) -> int:
     return 10 
 
 
+
+# --- SÉCURITÉ : Vérification robuste de l'URL (vivante) ---
 def _is_http_url(url: str) -> bool:
     if not isinstance(url, str):
         return False
     lowered = url.strip().lower()
     return lowered.startswith("http://") or lowered.startswith("https://")
+
+async def _is_url_alive(url: str) -> bool:
+    if not _is_http_url(url):
+        return False
+    headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"}
+    def _do_ping():
+        import requests
+        try:
+            res = requests.get(url, headers=headers, timeout=4, allow_redirects=True)
+            if res.status_code >= 400:
+                return False
+            final_url = res.url
+            if urlparse(url).path.strip('/') != '' and urlparse(final_url).path.strip('/') == '':
+                print(f"⚠️ Redirection vers l'accueil bloquée : {url}")
+                return False
+            texte_page = res.text[:3000].lower()
+            mots_interdits = ["page introuvable", "erreur 404", "n'existe pas", "not found", "page non trouvée"]
+            if any(mot in texte_page for mot in mots_interdits):
+                print(f"⚠️ Soft-404 bloquée : {url}")
+                return False
+            return True
+        except requests.RequestException:
+            return False
+    return await asyncio.to_thread(_do_ping)
 
 
 def _normalize_sources(raw_sources: list[Any]) -> list[dict[str, str]]:
@@ -293,6 +448,15 @@ def _normalize_sources(raw_sources: list[Any]) -> list[dict[str, str]]:
         organization = str(source.get("organization", "")).strip() or _domain_to_organization(url)
         normalized.append({"organization": organization[:255], "url": url[:2048]})
     return normalized
+
+
+def _get_search_query_semaphore() -> asyncio.Semaphore:
+    global _SEARCH_QUERY_SEMAPHORE
+    if _SEARCH_QUERY_SEMAPHORE is None:
+        _SEARCH_QUERY_SEMAPHORE = asyncio.Semaphore(
+            FACT_CHECK_SEARCH_QUERY_CONCURRENCY
+        )
+    return _SEARCH_QUERY_SEMAPHORE
 
 def _split_sentences(text: str) -> list[str]:
     if not isinstance(text, str):
@@ -771,6 +935,28 @@ Règles :
 
 def _fallback_reference_sources(fact_focus_text: str) -> list[dict[str, str]]:
     lower = (fact_focus_text or "").lower()
+    if any(token in lower for token in ("jeux olympiques", "olympique", "olympiques", "jo ")):
+        return [
+            {
+                "organization": "olympics.com",
+                "url": "https://olympics.com/",
+            },
+            {
+                "organization": "ioc.org",
+                "url": "https://www.ioc.org/",
+            },
+        ]
+    if any(token in lower for token in ("loi", "projet de loi", "proposition de loi", "decret", "décret", "reforme", "réforme")):
+        return [
+            {
+                "organization": "legifrance.gouv.fr",
+                "url": "https://www.legifrance.gouv.fr/",
+            },
+            {
+                "organization": "vie-publique.fr",
+                "url": "https://www.vie-publique.fr/",
+            },
+        ]
     if any(token in lower for token in ("population", "êtres humains", "terre", "monde")):
         return [
             {
@@ -856,6 +1042,62 @@ def _build_emergency_degraded_output(
     }
 
 
+def _build_event_context_fallback(
+    atomic_fact_text: str,
+    *,
+    output_language: str,
+    sources: list[dict[str, str]],
+) -> dict[str, Any] | None:
+    if not _looks_like_event_context(atomic_fact_text):
+        return None
+
+    normalized_sources = _normalize_sources(sources)
+    if not normalized_sources:
+        normalized_sources = _fallback_reference_sources(atomic_fact_text)
+    normalized_sources = _normalize_sources(normalized_sources)
+    if not normalized_sources:
+        return None
+
+    lower = atomic_fact_text.lower()
+    if any(token in lower for token in ("jeux olympiques", "olympique", "olympiques", "jo ")):
+        summary_fr = (
+            "Contexte : les Jeux olympiques renvoient a un evenement sportif international encadre par le CIO. "
+            "La formulation entendue doit etre rattachee a l'edition precise evoquee et verifiee avec les sources officielles ci-dessous."
+        )
+        summary_en = (
+            "Context: the Olympic Games are an international sporting event overseen by the IOC. "
+            "The spoken statement should be tied to the specific edition being referenced and checked against the official sources below."
+        )
+    elif any(token in lower for token in ("loi", "projet de loi", "proposition de loi", "decret", "décret", "reforme", "réforme")):
+        summary_fr = (
+            "Contexte : cette phrase renvoie a un texte legislatif ou reglementaire qu'il faut rattacher au bon projet, decret ou reforme. "
+            "Le cadrage journalistique doit donc s'appuyer sur les sources institutionnelles listees ci-dessous."
+        )
+        summary_en = (
+            "Context: this statement refers to a legislative or regulatory text that must be tied to the correct bill, decree, or reform. "
+            "The journalistic framing should rely on the institutional sources listed below."
+        )
+    else:
+        summary_fr = (
+            "Contexte : cette phrase renvoie a un evenement public identifiable qui doit etre resitue dans son edition, sa date ou sa sequence exacte. "
+            "Le cadrage peut s'appuyer sur les sources ci-dessous."
+        )
+        summary_en = (
+            "Context: this statement refers to an identifiable public event that should be placed in its exact edition, date, or sequence. "
+            "The framing can rely on the sources below."
+        )
+
+    summary = summary_en if output_language == "en" else summary_fr
+    return {
+        "claim": {"text": str(atomic_fact_text)},
+        "analysis": {"summary": summary, "sources": normalized_sources[:3]},
+        "overall_verdict": "context",
+        "afficher_bandeau": True,
+        "degraded_mode": True,
+        "degraded_mode_reason": "event_context_fallback",
+    }
+
+
 def _extract_gemini_grounding_sources(payload: dict[str, Any]) -> list[dict[str, str]]:
     candidates = payload.get("candidates")
     if not isinstance(candidates, list):
@@ -928,7 +1170,8 @@ async def _search_and_sort_sources_with_gemini(
     if not GEMINI_SEARCH_FALLBACK_ENABLED or not GEMINI_API_KEY:
         return []
     try:
-        sources = await asyncio.to_thread(_gemini_grounded_search_sync, query)
+        async with _get_search_query_semaphore():
+            sources = await asyncio.to_thread(_gemini_grounded_search_sync, query)
     except Exception as exc:
         print(f"⚠️ Erreur Gemini fallback search: {exc}")
         return []
@@ -957,17 +1200,23 @@ async def _search_and_sort_sources(query: str, allow_social: bool = False) -> li
     if len(query) < 10:
         return []
     try:
-        res = await _run_with_mistral_retries(
-            f"web_search:{query[:80]}",
-            lambda: client.beta.conversations.start_async(
-                model=_SMART_MODEL, inputs=query, tools=[{"type": "web_search"}]
-            ),
-            max_retries=(
-                0
-                if FACT_CHECK_EMERGENCY_DEGRADED_MODE
-                else max(0, MISTRAL_WEB_SEARCH_503_BEFORE_GEMINI - 1)
-            ),
-        )
+        async with _get_search_query_semaphore():
+            res = await asyncio.wait_for(
+                _run_with_mistral_retries(
+                    f"web_search:{query[:80]}",
+                    lambda: client.beta.conversations.start_async(
+                        model=_SMART_MODEL,
+                        inputs=query,
+                        tools=[{"type": "web_search"}],
+                    ),
+                    max_retries=(
+                        0
+                        if FACT_CHECK_EMERGENCY_DEGRADED_MODE
+                        else max(0, MISTRAL_WEB_SEARCH_503_BEFORE_GEMINI - 1)
+                    ),
+                ),
+                timeout=FACT_CHECK_SEARCH_QUERY_TIMEOUT_SECONDS,
+            )
         candidates = []
         for o in res.model_dump().get("outputs", []):
             for url in _extract_urls_from_text(
@@ -1000,6 +1249,21 @@ async def _search_and_sort_sources(query: str, allow_social: bool = False) -> li
             seen_urls.add(url)
             deduped.append(candidate)
         return [{"url": c["url"], "organization": c["organization"]} for c in deduped][:3]
+    except asyncio.TimeoutError:
+        gemini_sources = await _search_and_sort_sources_with_gemini(
+            query, allow_social=allow_social
+        )
+        if gemini_sources:
+            print(
+                "🛰️ [GEMINI FALLBACK] web search utilise apres timeout Mistral "
+                f"pour: {query[:80]}"
+            )
+            return gemini_sources
+        print(
+            f"⚠️ Recherche timeout apres {FACT_CHECK_SEARCH_QUERY_TIMEOUT_SECONDS:.1f}s: "
+            f"{query[:80]}"
+        )
+        return []
     except Exception as e:
         if _is_transient_mistral_error(e):
             gemini_sources = await _search_and_sort_sources_with_gemini(
@@ -1030,17 +1294,72 @@ async def _search_sources_with_fallbacks(
     collected: list[dict[str, str]] = []
     seen_urls: set[str] = set()
 
-    max_queries = 1 if FACT_CHECK_EMERGENCY_DEGRADED_MODE else 6
-    for query in queries[:max_queries]:
-        current = await _search_and_sort_sources(query, allow_social=allow_social)
-        for source in current:
-            url = source.get("url", "").strip()
-            if not _is_http_url(url) or url in seen_urls:
+    max_queries = (
+        1 if FACT_CHECK_EMERGENCY_DEGRADED_MODE else FACT_CHECK_SEARCH_QUERY_MAX_ATTEMPTS
+    )
+    selected_queries = queries[:max_queries]
+    local_parallelism = min(
+        FACT_CHECK_SEARCH_QUERY_CONCURRENCY,
+        2,
+        max(1, len(selected_queries)),
+    )
+
+    async def _run_query(query: str) -> tuple[str, list[dict[str, str]]]:
+        return query, await _search_and_sort_sources(query, allow_social=allow_social)
+
+    pending: set[asyncio.Task[tuple[str, list[dict[str, str]]]]] = set()
+    next_query_index = 0
+
+    def _schedule_more() -> None:
+        nonlocal next_query_index
+        while (
+            next_query_index < len(selected_queries)
+            and len(pending) < local_parallelism
+        ):
+            query = selected_queries[next_query_index]
+            next_query_index += 1
+            pending.add(asyncio.create_task(_run_query(query)))
+
+    _schedule_more()
+    while pending:
+        done, pending = await asyncio.wait(
+            pending, return_when=asyncio.FIRST_COMPLETED
+        )
+
+        early_stop = False
+        for task in done:
+            try:
+                query, current = task.result()
+            except asyncio.CancelledError:
                 continue
-            seen_urls.add(url)
-            collected.append(source)
-        if len(collected) >= 3:
+            except Exception as exc:
+                print(f"⚠️ Erreur tache recherche: {exc}")
+                continue
+
+            normalized_current = _normalize_sources(current)
+            if normalized_current:
+                print(
+                    "⚡ [SOURCES] arret anticipe apres une requete exploitable: "
+                    f"{query[:100]}"
+                )
+            for source in normalized_current:
+                url = source.get("url", "").strip()
+                if not _is_http_url(url) or url in seen_urls:
+                    continue
+                seen_urls.add(url)
+                collected.append(source)
+
+            if collected:
+                early_stop = True
+
+        if early_stop:
+            for task in pending:
+                task.cancel()
+            if pending:
+                await asyncio.gather(*pending, return_exceptions=True)
             break
+
+        _schedule_more()
 
     if not collected:
         fallback_sources = _fallback_reference_sources(base_query)
@@ -1077,9 +1396,119 @@ def build_routeur_prompt(clean_text: str) -> str:
     return f"""MISSION : Routeur de fact-checking. Phrase : '{clean_text}'
     1. VÉRIFIABILITÉ (est_verifiable) : True si la phrase affirme un fact ou une stat. False si c'est le futur ("Nous ferons") ou un voeu. Une opinion contenant un fait reste vérifiable (True).
     2. run_stats : True si présence d'une quantité, chiffre, prix, ou mots "aucun/tous/zéro".
-    3. run_contexte : True UNIQUEMENT pour un événement historique, guerre ou loi. 🚨 Faux pour l'économie.
+    3. run_contexte : True pour un événement réel ou public identifiable : guerre, grève, manifestation, élection, compétition sportive, Jeux Olympiques, crise, fait divers, loi, annonce politique. Faux pour une simple tendance économique sans événement précis.
     4. run_coherence : True si l'orateur jure n'avoir "jamais" changé d'avis.
     5. run_rhetorique : True si une question de journaliste est fournie."""
+
+
+def _looks_like_event_context(text: str) -> bool:
+    lowered = text.lower().strip()
+    if not lowered:
+        return False
+    return any(keyword in lowered for keyword in EVENT_KEYWORDS)
+
+
+def _has_non_year_numeric_signal(text: str) -> bool:
+    for number in re.findall(r"\b\d+\b", text or ""):
+        if len(number) == 4 and (number.startswith("19") or number.startswith("20")):
+            continue
+        return True
+    return False
+
+
+def _has_strong_statistical_signal(text: str) -> bool:
+    lowered = (text or "").lower().strip()
+    if not lowered:
+        return False
+    if "%" in lowered:
+        return True
+    if any(marker in lowered for marker in STAT_COMPARISON_MARKERS):
+        return True
+    return any(keyword in lowered for keyword in STRONG_STAT_KEYWORDS)
+
+
+def _looks_like_statistical_claim(text: str) -> bool:
+    return _has_strong_statistical_signal(text)
+
+
+def _extract_current_affirmation(current_json: dict[str, Any]) -> str:
+    current = current_json.get("affirmation_courante")
+    if isinstance(current, str) and current.strip():
+        return current.strip()
+    fallback = current_json.get("affirmation")
+    if isinstance(fallback, str) and fallback.strip():
+        return fallback.strip()
+    return ""
+
+
+def _extract_previous_context_phrases(
+    last_minute_json: dict[str, Any], current_affirmation: str
+) -> list[str]:
+    previous_phrases = last_minute_json.get("previous_phrases")
+    if isinstance(previous_phrases, list):
+        return [
+            phrase.strip()
+            for phrase in previous_phrases
+            if isinstance(phrase, str) and phrase.strip()
+        ]
+
+    phrases = [
+        phrase.strip()
+        for phrase in last_minute_json.get("phrases", [])
+        if isinstance(phrase, str) and phrase.strip()
+    ]
+    if phrases and current_affirmation and phrases[-1] == current_affirmation:
+        return phrases[:-1]
+    return phrases
+
+
+def _extract_numbers(text: str) -> list[str]:
+    if not isinstance(text, str):
+        return []
+    return re.findall(r"\d+(?:[.,]\d+)?", text)
+
+
+def _heuristic_self_correction(
+    current_affirmation: str, next_affirmation: str
+) -> dict[str, Any]:
+    normalized_next = (next_affirmation or "").strip().lower()
+    if not normalized_next:
+        return {
+            "next_is_correction": False,
+            "confidence": 0.0,
+            "reason": "",
+            "detector": "heuristic",
+        }
+
+    words = re.findall(r"[a-zA-ZÀ-ÿ0-9]+", normalized_next)
+    has_marker = any(marker in normalized_next for marker in CORRECTION_MARKERS)
+    current_numbers = _extract_numbers(current_affirmation)
+    next_numbers = _extract_numbers(next_affirmation)
+    replaces_number = bool(current_numbers and next_numbers and current_numbers != next_numbers)
+    short_followup = len(words) <= 10
+
+    if has_marker and (replaces_number or short_followup):
+        return {
+            "next_is_correction": True,
+            "confidence": 0.95 if replaces_number else 0.85,
+            "reason": "Correction explicite detectee (marqueur de correction).",
+            "detector": "heuristic",
+        }
+
+    if replaces_number and short_followup:
+        return {
+            "next_is_correction": True,
+            "confidence": 0.75,
+            "reason": "Valeur numerique remplacee dans une phrase courte.",
+            "detector": "heuristic",
+        }
+
+    return {
+        "next_is_correction": False,
+        "confidence": 0.2,
+        "reason": "Pas de signal clair de correction explicite.",
+        "detector": "heuristic",
+    }
 
 def build_stat_prompt(affirmation: str, sources_text: str) -> str:
     return f"""MISSION : Fact-checking STATISTIQUE.
@@ -1299,24 +1728,31 @@ async def analyze_debate_line(current_json: dict, last_minute_json: dict) -> dic
     
     # 🔥 LE FILET DE SÉCURITÉ ANTI-NETTOYEUR TROP ZÉLÉ 🔥
     if routage.get("est_verifiable", True):
+        texte_lower = atomic_fact_text.lower()
+        event_like = _looks_like_event_context(atomic_fact_text)
+        has_non_year_number = _has_non_year_numeric_signal(atomic_fact_text)
+        has_strong_stat_signal = _has_strong_statistical_signal(atomic_fact_text)
+
         if not routage.get("run_stats"):
-            texte_lower = atomic_fact_text.lower()
-            
             # 1. Recherche des mots-clés quantitatifs
-            mots_stats = ["aucun", "zéro", "plus un seul", "tous", "%", "pourcent"]
-            has_stat_word = any(mot in texte_lower for mot in mots_stats)
-            
-            # 2. Recherche intelligente de nombres (Exclut les années 19xx et 20xx)
-            nombres = re.findall(r'\b\d+\b', atomic_fact_text)
-            has_real_number = False
-            for n in nombres:
-                if not (len(n) == 4 and (n.startswith("19") or n.startswith("20"))):
-                    has_real_number = True
-                    break
-            
-            if has_stat_word or has_real_number:
+            mots_stats = ["aucun", "zéro", "plus un seul", "tous", "%"]
+            has_stat_word = any(mot in texte_lower for mot in mots_stats) or has_strong_stat_signal
+
+            if has_stat_word or has_non_year_number:
                 print("🛡️ [RATTRAPAGE] Vraie quantité détectée. Forçage run_stats=True.")
                 routage["run_stats"] = True
+        if not routage.get("run_contexte") and event_like:
+            print("🛡️ [RATTRAPAGE] Événement détecté. Forçage run_contexte=True.")
+            routage["run_contexte"] = True
+        if (
+            routage.get("run_contexte")
+            and routage.get("run_stats")
+        ):
+            print(
+                "🧭 [ARBITRAGE] stats prioritaires, run_contexte desactive "
+                "pour eviter le double-branching."
+            )
+            routage["run_contexte"] = False
     else:
         print("🛡️ [GARDE-FOU] Opinion ou Futur détecté par le Routeur. Annulation.")
         obs_vide = {
@@ -1438,6 +1874,27 @@ async def analyze_debate_line(current_json: dict, last_minute_json: dict) -> dic
         # so the payload remains postable for the overlay API contract.
         sources_obs = _normalize_sources(toutes_les_sources)
 
+    if routage.get("run_contexte") and not summary_output_text:
+        context_fallback = _build_event_context_fallback(
+            atomic_fact_text,
+            output_language=output_language,
+            sources=sources_obs or toutes_les_sources,
+        )
+        if context_fallback is not None:
+            print("🩹 [FALLBACK CONTEXTE] sortie contexte événementiel utilisée.")
+            claim_output_text = str(
+                context_fallback.get("claim", {}).get("text", claim_output_text)
+            ).strip() or claim_output_text
+            summary_output_text = str(
+                context_fallback.get("analysis", {}).get("summary", "")
+            ).strip()
+            sources_obs = _normalize_sources(
+                context_fallback.get("analysis", {}).get("sources", [])
+            )
+            verdict_obs = str(
+                context_fallback.get("overall_verdict", verdict_obs)
+            ).strip() or verdict_obs
+
     if not summary_output_text or not sources_obs:
         targeted_fallback = _build_emergency_degraded_output(
             original_assertion_for_analysis,
@@ -1473,18 +1930,95 @@ async def analyze_debate_line(current_json: dict, last_minute_json: dict) -> dic
 
 @activity.defn
 async def check_next_phrase_self_correction(current_json: dict, next_json: dict | None, last_minute_json: dict) -> dict:
-    if _local_check_next_phrase_self_correction is None:
+    current_affirmation = _extract_current_affirmation(current_json)
+    next_affirmation = _extract_current_affirmation(next_json or {})
+
+    if not current_affirmation:
         return {
-            "has_next_phrase": bool(next_json),
+            "has_next_phrase": bool(next_affirmation),
             "next_is_correction": False,
             "confidence": 0.0,
-            "reason": "Fallback: local correction detector unavailable.",
+            "reason": "Phrase courante vide.",
         }
-    return await _local_check_next_phrase_self_correction(
-        current_json,
-        next_json,
-        last_minute_json,
+
+    if not next_affirmation:
+        return {
+            "has_next_phrase": False,
+            "next_is_correction": False,
+            "confidence": 0.0,
+            "reason": "Aucune phrase suivante complete.",
+        }
+
+    heuristic = _heuristic_self_correction(current_affirmation, next_affirmation)
+    if bool(heuristic.get("next_is_correction")):
+        return {
+            "has_next_phrase": True,
+            "next_is_correction": True,
+            "confidence": float(heuristic.get("confidence", 0.0)),
+            "reason": str(heuristic.get("reason", "")),
+            "detector": "heuristic",
+            "current_affirmation": current_affirmation,
+            "next_affirmation": next_affirmation,
+        }
+
+    contexte_precedent = " ".join(
+        _extract_previous_context_phrases(last_minute_json, current_affirmation)
     )
+    prompt = f"""Tu es un detecteur de correction en direct.
+
+PHRASE_COURANTE:
+"{current_affirmation}"
+
+PHRASE_SUIVANTE:
+"{next_affirmation}"
+
+CONTEXTE_PRECEDENT:
+"{contexte_precedent}"
+
+Mission:
+- Determine si PHRASE_SUIVANTE corrige/retracte explicitement PHRASE_COURANTE.
+- Exemples de correction: "je corrige", "je me suis trompe", "non plutot", nouveau chiffre qui remplace le precedent.
+- Si PHRASE_SUIVANTE est seulement un ajout, une nouvelle idee ou une reformulation, alors ce n'est PAS une correction.
+
+Renvoie UNIQUEMENT ce JSON strict:
+{{
+  "next_is_correction": true|false,
+  "confidence": 0.0,
+  "reason": "court"
+}}
+"""
+    try:
+        parsed = await _mistral_json(prompt)
+        next_is_correction = bool(parsed.get("next_is_correction", False))
+        try:
+            confidence = float(parsed.get("confidence", 0.0))
+        except (TypeError, ValueError):
+            confidence = 0.0
+        confidence = max(0.0, min(1.0, confidence))
+        reason = str(parsed.get("reason", "")).strip()
+        return {
+            "has_next_phrase": True,
+            "next_is_correction": next_is_correction,
+            "confidence": confidence,
+            "reason": reason,
+            "detector": "llm",
+            "current_affirmation": current_affirmation,
+            "next_affirmation": next_affirmation,
+        }
+    except Exception as exc:
+        return {
+            "has_next_phrase": True,
+            "next_is_correction": bool(heuristic.get("next_is_correction", False)),
+            "confidence": float(heuristic.get("confidence", 0.0)),
+            "reason": (
+                f"LLM indisponible, fallback heuristique: "
+                f"{heuristic.get('reason', 'indetermine')}"
+            ),
+            "detector": "heuristic_fallback_after_llm_error",
+            "error": str(exc),
+            "current_affirmation": current_affirmation,
+            "next_affirmation": next_affirmation,
+        }
 
 @activity.defn
 async def post_fact_check_result(payload: dict) -> dict:
@@ -1508,3 +2042,8 @@ async def post_fact_check_result(payload: dict) -> dict:
             "posted_at_utc": posted_at,
             "error": str(e),
         }
+
+
+@activity.defn
+async def archive_transcript_entry(payload: dict) -> dict:
+    return await asyncio.to_thread(archive_transcript_entry_payload, payload)

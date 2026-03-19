@@ -130,6 +130,8 @@ it('keeps the fact-check scene persistent when configured', function () {
 });
 
 it('returns an api error when obs switch fails', function () {
+    config()->set('obs.required', true);
+
     Event::fake([FactCheckContentUpdated::class]);
     Bus::fake();
 
@@ -158,6 +160,45 @@ it('returns an api error when obs switch fails', function () {
         ->assertJsonPath('code', 'obs_switch_failed');
 
     Event::assertNotDispatched(FactCheckContentUpdated::class);
+    Bus::assertNotDispatched(VerifyFactCheckSceneTimestampJob::class);
+});
+
+it('broadcasts content even when obs switch fails and obs is optional', function () {
+    CarbonImmutable::setTestNow(CarbonImmutable::parse('2026-02-28 12:00:00 UTC'));
+
+    config()->set('obs.required', false);
+    config()->set('obs.scenes.fact_check', 'fact-check');
+    config()->set('obs.cache.prefix', 'obs:test');
+    config()->set('obs.persist_fact_check_scene', true);
+
+    Event::fake([FactCheckContentUpdated::class]);
+    Bus::fake();
+
+    $obsSceneSwitcher = \Mockery::mock(ObsSceneSwitcher::class);
+    $obsSceneSwitcher
+        ->shouldReceive('switchToScene')
+        ->once()
+        ->andThrow(new ObsSwitchFailedException('Failed to switch OBS scene.'));
+
+    $this->app->instance(ObsSceneSwitcher::class, $obsSceneSwitcher);
+
+    $this->postJson('/api/stream/fact-check', [
+        'claim' => ['text' => 'Payload'],
+        'analysis' => [
+            'summary' => 'Payload summary',
+            'sources' => [
+                [
+                    'organization' => 'INSEE',
+                    'url' => 'https://www.insee.fr/fr/statistiques/2381474',
+                ],
+            ],
+        ],
+        'overall_verdict' => 'partially_accurate',
+    ])
+        ->assertSuccessful()
+        ->assertJsonPath('ok', true);
+
+    Event::assertDispatched(FactCheckContentUpdated::class);
     Bus::assertNotDispatched(VerifyFactCheckSceneTimestampJob::class);
 });
 

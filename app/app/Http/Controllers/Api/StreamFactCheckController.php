@@ -4,11 +4,13 @@ namespace App\Http\Controllers\Api;
 
 use App\Contracts\ObsSceneSwitcher;
 use App\Events\FactCheckContentUpdated;
+use App\Exceptions\ObsSwitchFailedException;
 use App\Http\Controllers\Controller;
 use App\Http\Requests\StreamFactCheckRequest;
 use App\Jobs\VerifyFactCheckSceneTimestampJob;
 use App\Services\FactCheckPayloadCache;
 use Illuminate\Http\JsonResponse;
+use Illuminate\Support\Facades\Log;
 
 class StreamFactCheckController extends Controller
 {
@@ -32,7 +34,18 @@ class StreamFactCheckController extends Controller
             'clear' => false,
         ];
 
-        $obsSceneSwitcher->switchToScene($scene);
+        try {
+            $obsSceneSwitcher->switchToScene($scene);
+        } catch (ObsSwitchFailedException $exception) {
+            if (config('obs.required', false)) {
+                throw $exception;
+            }
+
+            Log::warning('OBS scene switch failed; continuing with overlay broadcast only.', [
+                'scene' => $scene,
+                'message' => $exception->getMessage(),
+            ]);
+        }
 
         $factCheckPayloadCache->rememberLastSwitchAt($switchedAtMs);
         $factCheckPayloadCache->setLatest($payload);
