@@ -38,6 +38,7 @@ _SMART_MODEL = "mistral-medium-latest"
 _BEST_MODEL = "mistral-large-latest"
 
 CACHE_RESULTATS_GLOBAUX = {}
+_SEARCH_QUERY_SEMAPHORE: asyncio.Semaphore | None = None
 
 # --- TIERS fusionnés et complétés pour le pipeline Emma ---
 TIER_1_GOUV = [
@@ -48,7 +49,7 @@ TIER_1_GOUV = [
 TIER_2_MEDIAS = [
     "actu.fr", "francebleu.fr", "lemonde.fr", "liberation.fr", "rfi.fr", "lepoint.fr", "ladepeche.fr", "france24.com",
     "franceculture.fr", "20minutes.fr", "ouest-france.fr", "mediapart.fr", "numerama.com", "lefigaro.fr", "franceinfo.fr",
-    "afp.com", "sudouest.fr", "lesechos.fr", "marianne.net", "francetvinfo.fr", "radiofrance.fr", "actu.orange.fr",
+    "afp.com", "afp.fr", "sudouest.fr", "lesechos.fr", "marianne.net", "francetvinfo.fr", "radiofrance.fr", "actu.orange.fr",
     "tf1info.fr", "lexpress.fr", "dalloz-actualite.fr", "ofce.sciences-po.fr", "75secondes.fr", "legifiscal.fr",
     "fr.wikipedia.org", "reporterre.net", "mouvement-europeen.eu"
 ]
@@ -88,9 +89,6 @@ FACT_KEYWORDS = (
     "dette",
     "population",
     "habitants",
-    "terre",
-    "monde",
-    "france",
     "euro",
     "euros",
     "milliard",
@@ -165,6 +163,18 @@ STAT_COMPARISON_MARKERS = (
     "double",
     "triple",
 )
+STRONG_STAT_KEYWORDS = (
+    "pib",
+    "dette",
+    "population",
+    "habitants",
+    "euro",
+    "euros",
+    "milliard",
+    "million",
+    "pourcent",
+    "pourcentage",
+)
 EVENT_KEYWORDS = (
     "jeux olympiques",
     "jo ",
@@ -217,10 +227,19 @@ GEMINI_SEARCH_FALLBACK_MODEL = (
     or "gemini-2.5-flash"
 )
 GEMINI_SEARCH_TIMEOUT_SECONDS = max(
-    3.0, float(os.getenv("GEMINI_SEARCH_TIMEOUT_SECONDS", "20"))
+    3.0, float(os.getenv("GEMINI_SEARCH_TIMEOUT_SECONDS", "8"))
 )
 MISTRAL_WEB_SEARCH_503_BEFORE_GEMINI = max(
     1, int(os.getenv("MISTRAL_WEB_SEARCH_503_BEFORE_GEMINI", "1"))
+)
+FACT_CHECK_SEARCH_QUERY_TIMEOUT_SECONDS = max(
+    2.0, float(os.getenv("FACT_CHECK_SEARCH_QUERY_TIMEOUT_SECONDS", "8.0"))
+)
+FACT_CHECK_SEARCH_QUERY_CONCURRENCY = min(
+    2, max(1, int(os.getenv("FACT_CHECK_SEARCH_QUERY_CONCURRENCY", "2")))
+)
+FACT_CHECK_SEARCH_QUERY_MAX_ATTEMPTS = max(
+    1, int(os.getenv("FACT_CHECK_SEARCH_QUERY_MAX_ATTEMPTS", "3"))
 )
 FACT_CHECK_EMERGENCY_DEGRADED_MODE = (
     os.getenv("FACT_CHECK_EMERGENCY_DEGRADED_MODE", "").strip().lower()
@@ -429,6 +448,15 @@ def _normalize_sources(raw_sources: list[Any]) -> list[dict[str, str]]:
         organization = str(source.get("organization", "")).strip() or _domain_to_organization(url)
         normalized.append({"organization": organization[:255], "url": url[:2048]})
     return normalized
+
+
+def _get_search_query_semaphore() -> asyncio.Semaphore:
+    global _SEARCH_QUERY_SEMAPHORE
+    if _SEARCH_QUERY_SEMAPHORE is None:
+        _SEARCH_QUERY_SEMAPHORE = asyncio.Semaphore(
+            FACT_CHECK_SEARCH_QUERY_CONCURRENCY
+        )
+    return _SEARCH_QUERY_SEMAPHORE
 
 def _split_sentences(text: str) -> list[str]:
     if not isinstance(text, str):
@@ -1142,7 +1170,8 @@ async def _search_and_sort_sources_with_gemini(
     if not GEMINI_SEARCH_FALLBACK_ENABLED or not GEMINI_API_KEY:
         return []
     try:
-        sources = await asyncio.to_thread(_gemini_grounded_search_sync, query)
+        async with _get_search_query_semaphore():
+            sources = await asyncio.to_thread(_gemini_grounded_search_sync, query)
     except Exception as exc:
         print(f"⚠️ Erreur Gemini fallback search: {exc}")
         return []
@@ -1171,17 +1200,23 @@ async def _search_and_sort_sources(query: str, allow_social: bool = False) -> li
     if len(query) < 10:
         return []
     try:
-        res = await _run_with_mistral_retries(
-            f"web_search:{query[:80]}",
-            lambda: client.beta.conversations.start_async(
-                model=_SMART_MODEL, inputs=query, tools=[{"type": "web_search"}]
-            ),
-            max_retries=(
-                0
-                if FACT_CHECK_EMERGENCY_DEGRADED_MODE
-                else max(0, MISTRAL_WEB_SEARCH_503_BEFORE_GEMINI - 1)
-            ),
-        )
+        async with _get_search_query_semaphore():
+            res = await asyncio.wait_for(
+                _run_with_mistral_retries(
+                    f"web_search:{query[:80]}",
+                    lambda: client.beta.conversations.start_async(
+                        model=_SMART_MODEL,
+                        inputs=query,
+                        tools=[{"type": "web_search"}],
+                    ),
+                    max_retries=(
+                        0
+                        if FACT_CHECK_EMERGENCY_DEGRADED_MODE
+                        else max(0, MISTRAL_WEB_SEARCH_503_BEFORE_GEMINI - 1)
+                    ),
+                ),
+                timeout=FACT_CHECK_SEARCH_QUERY_TIMEOUT_SECONDS,
+            )
         candidates = []
         for o in res.model_dump().get("outputs", []):
             for url in _extract_urls_from_text(
@@ -1214,6 +1249,21 @@ async def _search_and_sort_sources(query: str, allow_social: bool = False) -> li
             seen_urls.add(url)
             deduped.append(candidate)
         return [{"url": c["url"], "organization": c["organization"]} for c in deduped][:3]
+    except asyncio.TimeoutError:
+        gemini_sources = await _search_and_sort_sources_with_gemini(
+            query, allow_social=allow_social
+        )
+        if gemini_sources:
+            print(
+                "🛰️ [GEMINI FALLBACK] web search utilise apres timeout Mistral "
+                f"pour: {query[:80]}"
+            )
+            return gemini_sources
+        print(
+            f"⚠️ Recherche timeout apres {FACT_CHECK_SEARCH_QUERY_TIMEOUT_SECONDS:.1f}s: "
+            f"{query[:80]}"
+        )
+        return []
     except Exception as e:
         if _is_transient_mistral_error(e):
             gemini_sources = await _search_and_sort_sources_with_gemini(
@@ -1244,17 +1294,72 @@ async def _search_sources_with_fallbacks(
     collected: list[dict[str, str]] = []
     seen_urls: set[str] = set()
 
-    max_queries = 1 if FACT_CHECK_EMERGENCY_DEGRADED_MODE else 6
-    for query in queries[:max_queries]:
-        current = await _search_and_sort_sources(query, allow_social=allow_social)
-        for source in current:
-            url = source.get("url", "").strip()
-            if not _is_http_url(url) or url in seen_urls:
+    max_queries = (
+        1 if FACT_CHECK_EMERGENCY_DEGRADED_MODE else FACT_CHECK_SEARCH_QUERY_MAX_ATTEMPTS
+    )
+    selected_queries = queries[:max_queries]
+    local_parallelism = min(
+        FACT_CHECK_SEARCH_QUERY_CONCURRENCY,
+        2,
+        max(1, len(selected_queries)),
+    )
+
+    async def _run_query(query: str) -> tuple[str, list[dict[str, str]]]:
+        return query, await _search_and_sort_sources(query, allow_social=allow_social)
+
+    pending: set[asyncio.Task[tuple[str, list[dict[str, str]]]]] = set()
+    next_query_index = 0
+
+    def _schedule_more() -> None:
+        nonlocal next_query_index
+        while (
+            next_query_index < len(selected_queries)
+            and len(pending) < local_parallelism
+        ):
+            query = selected_queries[next_query_index]
+            next_query_index += 1
+            pending.add(asyncio.create_task(_run_query(query)))
+
+    _schedule_more()
+    while pending:
+        done, pending = await asyncio.wait(
+            pending, return_when=asyncio.FIRST_COMPLETED
+        )
+
+        early_stop = False
+        for task in done:
+            try:
+                query, current = task.result()
+            except asyncio.CancelledError:
                 continue
-            seen_urls.add(url)
-            collected.append(source)
-        if len(collected) >= 3:
+            except Exception as exc:
+                print(f"⚠️ Erreur tache recherche: {exc}")
+                continue
+
+            normalized_current = _normalize_sources(current)
+            if normalized_current:
+                print(
+                    "⚡ [SOURCES] arret anticipe apres une requete exploitable: "
+                    f"{query[:100]}"
+                )
+            for source in normalized_current:
+                url = source.get("url", "").strip()
+                if not _is_http_url(url) or url in seen_urls:
+                    continue
+                seen_urls.add(url)
+                collected.append(source)
+
+            if collected:
+                early_stop = True
+
+        if early_stop:
+            for task in pending:
+                task.cancel()
+            if pending:
+                await asyncio.gather(*pending, return_exceptions=True)
             break
+
+        _schedule_more()
 
     if not collected:
         fallback_sources = _fallback_reference_sources(base_query)
@@ -1303,15 +1408,27 @@ def _looks_like_event_context(text: str) -> bool:
     return any(keyword in lowered for keyword in EVENT_KEYWORDS)
 
 
-def _looks_like_statistical_claim(text: str) -> bool:
-    lowered = text.lower().strip()
-    if not lowered:
-        return False
-    if any(marker in lowered for marker in STAT_COMPARISON_MARKERS):
-        return True
-    if any(keyword in lowered for keyword in FACT_KEYWORDS):
+def _has_non_year_numeric_signal(text: str) -> bool:
+    for number in re.findall(r"\b\d+\b", text or ""):
+        if len(number) == 4 and (number.startswith("19") or number.startswith("20")):
+            continue
         return True
     return False
+
+
+def _has_strong_statistical_signal(text: str) -> bool:
+    lowered = (text or "").lower().strip()
+    if not lowered:
+        return False
+    if "%" in lowered:
+        return True
+    if any(marker in lowered for marker in STAT_COMPARISON_MARKERS):
+        return True
+    return any(keyword in lowered for keyword in STRONG_STAT_KEYWORDS)
+
+
+def _looks_like_statistical_claim(text: str) -> bool:
+    return _has_strong_statistical_signal(text)
 
 
 def _extract_current_affirmation(current_json: dict[str, Any]) -> str:
@@ -1611,27 +1728,31 @@ async def analyze_debate_line(current_json: dict, last_minute_json: dict) -> dic
     
     # 🔥 LE FILET DE SÉCURITÉ ANTI-NETTOYEUR TROP ZÉLÉ 🔥
     if routage.get("est_verifiable", True):
+        texte_lower = atomic_fact_text.lower()
+        event_like = _looks_like_event_context(atomic_fact_text)
+        has_non_year_number = _has_non_year_numeric_signal(atomic_fact_text)
+        has_strong_stat_signal = _has_strong_statistical_signal(atomic_fact_text)
+
         if not routage.get("run_stats"):
-            texte_lower = atomic_fact_text.lower()
-            
             # 1. Recherche des mots-clés quantitatifs
             mots_stats = ["aucun", "zéro", "plus un seul", "tous", "%"]
-            has_stat_word = any(mot in texte_lower for mot in mots_stats) or _looks_like_statistical_claim(atomic_fact_text)
-            
-            # 2. Recherche intelligente de nombres (Exclut les années 19xx et 20xx)
-            nombres = re.findall(r'\b\d+\b', atomic_fact_text)
-            has_real_number = False
-            for n in nombres:
-                if not (len(n) == 4 and (n.startswith("19") or n.startswith("20"))):
-                    has_real_number = True
-                    break
-            
-            if has_stat_word or has_real_number:
+            has_stat_word = any(mot in texte_lower for mot in mots_stats) or has_strong_stat_signal
+
+            if has_stat_word or has_non_year_number:
                 print("🛡️ [RATTRAPAGE] Vraie quantité détectée. Forçage run_stats=True.")
                 routage["run_stats"] = True
-        if not routage.get("run_contexte") and _looks_like_event_context(atomic_fact_text):
+        if not routage.get("run_contexte") and event_like:
             print("🛡️ [RATTRAPAGE] Événement détecté. Forçage run_contexte=True.")
             routage["run_contexte"] = True
+        if (
+            routage.get("run_contexte")
+            and routage.get("run_stats")
+        ):
+            print(
+                "🧭 [ARBITRAGE] stats prioritaires, run_contexte desactive "
+                "pour eviter le double-branching."
+            )
+            routage["run_contexte"] = False
     else:
         print("🛡️ [GARDE-FOU] Opinion ou Futur détecté par le Routeur. Annulation.")
         obs_vide = {
