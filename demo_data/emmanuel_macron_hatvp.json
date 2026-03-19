@@ -1,0 +1,12 @@
+{
+  "nom": "Emmanuel Macron",
+  "mandats_prives": [
+    {
+      "secteur": "Santé / Industrie Pharmaceutique",
+      "entreprise": "Sanofi",
+      "fonction": "Actionnaire (Mock Demo)",
+      "remuneration_annuelle": "Dividendes (Mock)"
+    }
+  ],
+  "source_url": "https://www.hatvp.fr/fiche/emmanuel-macron"
+}

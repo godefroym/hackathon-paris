@@ -1,0 +1,18 @@
+# Veristral - Dependencies
+# ========================
+
+# AI & APIs
+mistralai
+tavily-python
+
+# Workflow & Backend
+temporalio
+requests
+python-dotenv
+websockets
+
+# Audio Ingestion
+#pyaudio
+
+# Terminal UI & Formatting
+rich
