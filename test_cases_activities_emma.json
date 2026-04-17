@@ -1,0 +1,142 @@
+[
+  {
+    "id": "demo-01",
+    "type_attendu": "demo_override",
+    "current_json": {
+      "personne": "Directeur financier",
+      "question_posee": "Comment évolue la situation financière du groupe ?",
+      "affirmation_courante": "Chez Innovation Groupe la tresorerie est est forte baisse au T4"
+    },
+    "last_minute_json": {
+      "previous_phrases": [
+        "Nous parlons des résultats trimestriels de l'entreprise."
+      ]
+    }
+  },
+  {
+    "id": "demo-02",
+    "type_attendu": "demo_override",
+    "current_json": {
+      "personne": "Consultant économique",
+      "question_posee": "Comment se compare l'entreprise à l'économie française ?",
+      "affirmation_courante": "Contrairement à la croissance de la France qui est de 3% cette année"
+    },
+    "last_minute_json": {
+      "previous_phrases": [
+        "Le débat porte sur la conjoncture économique."
+      ]
+    }
+  },
+  {
+    "id": "stat-01",
+    "type_attendu": "statistique",
+    "current_json": {
+      "personne": "CEO",
+      "question_posee": "Quel est le rythme de croissance actuel ?",
+      "affirmation_courante": "Le chiffre d'affaires a progressé de 25 % sur un an."
+    },
+    "last_minute_json": {
+      "previous_phrases": [
+        "On commente les indicateurs de performance."
+      ]
+    }
+  },
+  {
+    "id": "stat-02",
+    "type_attendu": "statistique",
+    "current_json": {
+      "personne": "DRH",
+      "question_posee": "Quelle est la situation de l'emploi ?",
+      "affirmation_courante": "Nous avons recruté 500 personnes ce trimestre."
+    },
+    "last_minute_json": {
+      "previous_phrases": [
+        "On parle des embauches sur les trois derniers mois."
+      ]
+    }
+  },
+  {
+    "id": "stat-03",
+    "type_attendu": "statistique",
+    "current_json": {
+      "personne": "Responsable financier",
+      "question_posee": "Comment évolue la marge ?",
+      "affirmation_courante": "La marge opérationnelle a doublé cette année."
+    },
+    "last_minute_json": {
+      "previous_phrases": [
+        "Les analystes reviennent sur la rentabilité du groupe."
+      ]
+    }
+  },
+  {
+    "id": "ctx-01",
+    "type_attendu": "contexte",
+    "current_json": {
+      "personne": "Porte-parole",
+      "question_posee": "Que s'est-il passé au conseil d'administration ?",
+      "affirmation_courante": "La restructuration a été décidée dans un climat de très forte tension."
+    },
+    "last_minute_json": {
+      "previous_phrases": [
+        "On évoque la dernière réunion du conseil."
+      ]
+    }
+  },
+  {
+    "id": "ctx-02",
+    "type_attendu": "contexte",
+    "current_json": {
+      "personne": "Directrice de la stratégie",
+      "question_posee": "Quel a été l'effet de la crise énergétique ?",
+      "affirmation_courante": "La guerre en Ukraine a bouleversé toute la stratégie d'approvisionnement du groupe."
+    },
+    "last_minute_json": {
+      "previous_phrases": [
+        "Le groupe dépendait auparavant du gaz européen."
+      ]
+    }
+  },
+  {
+    "id": "ctx-03",
+    "type_attendu": "contexte",
+    "current_json": {
+      "personne": "Responsable conformité",
+      "question_posee": "Pourquoi ce changement de procédure ?",
+      "affirmation_courante": "Le décret a modifié les conditions d'application de cette aide."
+    },
+    "last_minute_json": {
+      "previous_phrases": [
+        "On parle d'un dispositif public qui encadre les investissements."
+      ]
+    }
+  },
+  {
+    "id": "mix-01",
+    "type_attendu": "statistique",
+    "current_json": {
+      "personne": "Analyste",
+      "question_posee": "La situation est-elle meilleure qu'avant ?",
+      "affirmation_courante": "Depuis la crise, nos ventes ont chuté de 40 %."
+    },
+    "last_minute_json": {
+      "previous_phrases": [
+        "Le débat compare l'avant et l'après-crise."
+      ]
+    }
+  },
+  {
+    "id": "mix-02",
+    "type_attendu": "contexte",
+    "current_json": {
+      "personne": "Président",
+      "question_posee": "Comment jugez-vous cette séquence ?",
+      "affirmation_courante": "Cette crise sanitaire a révélé les limites de notre organisation."
+    },
+    "last_minute_json": {
+      "previous_phrases": [
+        "On revient sur la gestion de la pandémie dans l'entreprise."
+      ]
+    }
+  }
+]
